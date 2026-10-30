@@ -1,0 +1,10 @@
+pyproject.toml
+requirements.txt
+src/scimulab/__init__.py
+src/scimulab/scimulab.py
+src/scimulab/vasp_utils.py
+src/scimulab.egg-info/PKG-INFO
+src/scimulab.egg-info/SOURCES.txt
+src/scimulab.egg-info/dependency_links.txt
+src/scimulab.egg-info/requires.txt
+src/scimulab.egg-info/top_level.txt

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scimulab"
+version = "0.1.0"
+description = "A python package for processing VASP simulations of nanoparticle models, surfaces and supported systems"
+authors = [{name = "Luis Alberto Lares Rangel", email="luis.lares@icat.unam.mx"}]
+license = {file = "LICENSE"}
+readme = "README.md"
+requires-python = ">=3.4"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

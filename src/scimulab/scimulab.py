@@ -1,4 +1,3 @@
-import os
 import warnings
 from pathlib import Path
 from functools import cached_property
@@ -10,27 +9,27 @@ from ase.io import read, write
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.io.ase import AseAtomsAdaptor
 
-from src.scimulab.vasp_utils import extract_outcar_property, parse_acf_file
+from scimulab.vasp_utils import extract_outcar_property, parse_acf_file
 
 
 class VaspCalculation:
 
-    def __init__(self, directory: str):
-        self.directory = directory
+    def __init__(self, directory: str | Path):
+        self._directory = Path(directory)
 
-        if not self.directory.is_dir():
+        if not self._directory.is_dir():
             raise FileNotFoundError(
-                f"The specified directory '{self.directory}' does not exist or is invalid"
+                f"The specified directory '{self._directory}' does not exist or is invalid"
             )
         
-        self._vasprun_path: Path = Path(os.path.join(directory, "vasprun.xml"))
-        self._poscar_path: Path = Path(os.path.join(directory, "POSCAR"))
-        self._contcar_path: Path = Path(os.path.join(directory, "CONTCAR"))
-        self._outcar_path: Path = Path(os.path.join(directory, "OUTCAR"))
-        self._oszicar_path: Path = Path(os.path.join(directory, "OSZICAR"))
-        self._doscar_path: Path = Path(os.path.join(directory, "DOSCAR"))
-        self._acf_charge_path: Path = Path(os.path.join(directory, "ACF_charge.dat"))
-        self._acf_mag_path: Path = Path(os.path.join(directory, "ACF_mag.dat"))
+        self._vasprun_path: Path = self._directory / "vasprun.xml"
+        self._poscar_path: Path = self._directory / "POSCAR"
+        self._contcar_path: Path = self._directory / "CONTCAR"
+        self._outcar_path: Path = self._directory / "OUTCAR"
+        self._oszicar_path: Path = self._directory / "OSZICAR"
+        self._doscar_path: Path = self._directory / "DOSCAR"
+        self._acf_charge_path: Path = self._directory / "ACF_charge.dat"
+        self._acf_mag_path: Path = self._directory / "ACF_mag.dat"
 
     @cached_property
     def geometry(self) -> Atoms:
@@ -246,7 +245,7 @@ class VaspCalculation:
         """
         Extracts the atomic charges calculated via Bader charge analysis.
 
-        Utilizes the generalized `parse_acf_file` function to read the standard 
+        Utilizes the generalized 'parse_acf_file' function to read the standard 
         Bader charge output file (typically 'ACF.dat'). The extracted values represent 
         the total number of electrons assigned to each atom's Bader volume.
 
@@ -271,7 +270,7 @@ class VaspCalculation:
         """
         Extracts the local atomic magnetic moments calculated via Bader analysis.
 
-        Utilizes the generalized `parse_acf_file` function to read the spin-polarized 
+        Utilizes the generalized 'parse_acf_file' function to read the spin-polarized 
         Bader output file (typically 'ACF_mag.dat'). The extracted values represent 
         the net spin (spin-up minus spin-down electrons) within each atom's Bader volume.
 

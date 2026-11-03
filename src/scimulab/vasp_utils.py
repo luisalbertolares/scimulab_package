@@ -1,16 +1,16 @@
 import os
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Union, List, Callable, Optional
 
 import numpy as np
 
 def extract_outcar_property(
         outcar_path: str | Path, 
-        target_patterns: Union[str, List[str]], 
+        target_patterns: str | list[str], 
         property_name: str,
         extract_func: Callable[[str], float] = lambda line: float(line.split()[-1])
-) -> Optional[float]:
+) -> float | None:
     """
     Generalized function to extract a scalar property from the end of an OUTCAR file.
 
@@ -20,7 +20,7 @@ def extract_outcar_property(
 
     Args:
         outcar_path (str | Path): The full path to the OUTCAR file (or directory if you append it).
-        target_patterns (str | List[str]): A single string or a list of strings 
+        target_patterns (str | list[str]): A single string or a list of strings 
             that must all be present in the target line.
         property_name (str): Human-readable name of the property (used for warnings).
         extract_func (Callable): A function that takes the matched line (str) 
@@ -28,7 +28,7 @@ def extract_outcar_property(
             Defaults to extracting the last whitespace-separated element.
 
     Returns:
-        Optional[float]: The extracted property value, or None if the pattern 
+        float | None: The extracted property value, or None if the pattern 
         is missing, the file is empty, or an error occurs.
     """
     # Normalize target_patterns to a list for unified processing
@@ -91,11 +91,12 @@ def extract_outcar_property(
         )
         return None
 
+
 def parse_acf_file(
         acf_path: str | Path,
         column_index: int = 4,
-        expected_atoms: Optional[int] = None
-) -> Optional[np.ndarray]:
+        expected_atoms: int | None = None
+) -> np.ndarray | None:
     """
     Parses a Bader ACF file to extract a specific column of atomic properties 
     (e.g., charge, volume, or magnetic moment) as a NumPy array.
@@ -107,10 +108,10 @@ def parse_acf_file(
         acf_path (str | Path): The full path to the ACF file (e.g., 'ACF.dat').
         column_index (int): The zero-based index of the column to extract. 
             Defaults to 4 (corresponds to CHARGE in ACF.dat).
-        expected_atoms (int, optional): The expected number of atoms.
+        expected_atoms (int | None, optional): The expected number of atoms.
 
     Returns:
-        Optional[np.ndarray]: A 1D NumPy array of extracted values for each atom. 
+        np.ndarray | None: A 1D NumPy array of extracted values for each atom. 
         Returns None if the file is missing, malformed, or an error occurs.
     """
     try:

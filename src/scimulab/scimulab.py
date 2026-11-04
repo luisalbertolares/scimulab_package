@@ -3,13 +3,14 @@ from pathlib import Path
 from functools import cached_property
 
 import numpy as np
+from collections import Counter
 
 from ase import Atoms
 from ase.io import read, write
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.io.ase import AseAtomsAdaptor
 
-from scimulab.vasp_utils import extract_outcar_property, parse_acf_file
+from .vasp_utils import extract_outcar_property, parse_acf_file
 
 
 class VaspCalculation:
@@ -60,8 +61,8 @@ class VaspCalculation:
                                 ionic_step_skip=None,
                                 ionic_step_offset=-1
             )
-            self.geometry = AseAtomsAdaptor.get_atoms(vasprun.structures[-1])
-            return self.geometry
+            self._geometry = AseAtomsAdaptor.get_atoms(vasprun.structures[-1])
+            return self._geometry
 
         except FileNotFoundError:
             warnings.warn(
@@ -78,15 +79,15 @@ class VaspCalculation:
             )
 
         try:
-            self.geometry = read(self._poscar_path)
-            return self.geometry
+            self._geometry = read(self._poscar_path)
+            return self._geometry
 
         except Exception:
             pass
         
         try:
-            self.geometry = read(self._contcar_path)
-            return self.geometry
+            self._geometry = read(self._contcar_path)
+            return self._geometry
 
         except FileNotFoundError:
             warnings.warn(
@@ -94,7 +95,7 @@ class VaspCalculation:
                 category=UserWarning,
                 stacklevel=2
             )
-            self.geometry = None
+            self._geometry = None
             return None
 
         except Exception as e:
@@ -103,7 +104,7 @@ class VaspCalculation:
                 category=RuntimeWarning,
                 stacklevel=2
             )
-            self.geometry = None
+            self._geometry = None
             return None
 
     @cached_property
@@ -118,7 +119,7 @@ class VaspCalculation:
                'energy(sigma->0)', avoiding high RAM usage on giant files.
 
         Returns:
-            float: The final total energy if successfully parsed, updates 'self.total_energy'.
+            float: The final total energy if successfully parsed, updates 'self._total_energy'.
             None: If all stages fail due to missing, empty, or corrupted files.
 
         Raises:
@@ -136,8 +137,8 @@ class VaspCalculation:
                                 ionic_step_skip=None,
                                 ionic_step_offset=-1
             )
-            self.total_energy = float(vasprun.final_energy)
-            return self.total_energy
+            self._total_energy = float(vasprun.final_energy)
+            return self._total_energy
             
         except FileNotFoundError:
             warnings.warn(
@@ -156,8 +157,8 @@ class VaspCalculation:
         # Since vasprun.xml didn't work, we try to extract final energy from OSZICAR
         try:
             oszicar = Oszicar(self._oszicar_path)
-            self.total_energy = float(oszicar.ionic_steps[-1]['E0'])
-            return self.total_energy
+            self._total_energy = float(oszicar.ionic_steps[-1]['E0'])
+            return self._total_energy
 
         except FileNotFoundError:
             warnings.warn(
@@ -181,9 +182,9 @@ class VaspCalculation:
             property_name="total energy"
         )
         if tot_energy is not None:
-            self.total_energy = tot_energy
+            self._total_energy = tot_energy
 
-        return getattr(self, 'total_energy', None)
+        return getattr(self, '_total_energy', None)
 
     @cached_property
     def net_magmom(self) -> float:
@@ -212,8 +213,8 @@ class VaspCalculation:
         # Extracting net magnetic moment from OSZICAR
         try:
             oszicar = Oszicar(self._oszicar_path)
-            self.net_magmom = oszicar.ionic_steps[-1].get('mag', None)
-            return self.net_magmom
+            self._net_magmom = oszicar.ionic_steps[-1].get('mag', None)
+            return self._net_magmom
 
         except FileNotFoundError:
             warnings.warn(
@@ -236,9 +237,9 @@ class VaspCalculation:
             property_name="net magnetic moment"
         )
         if magmom is not None:
-            self.net_magmom = magmom
+            self._net_magmom = magmom
 
-        return getattr(self, 'net_magmom', None)
+        return getattr(self, '_net_magmom', None)
 
     @cached_property
     def bader_charge(self) -> np.ndarray:
@@ -261,9 +262,9 @@ class VaspCalculation:
             acf_path=self._acf_charge_path
         )
         if q_bader is not None:
-            self.bader_charge = q_bader
+            self._bader_charge = q_bader
 
-        return getattr(self, 'bader_charge', None)
+        return getattr(self, '_bader_charge', None)
 
     @cached_property
     def bader_magmom(self) -> np.ndarray:
@@ -286,6 +287,24 @@ class VaspCalculation:
             acf_path=self._acf_mag_path
         )
         if mag_bader is not None:
-            self.bader_magmom = mag_bader
+            self._bader_magmom = mag_bader
 
-        return getattr(self, 'bader_magmom', None)
+        return getattr(self, '_bader_magmom', None)
+
+    @property
+    def composition(self) -> dict[str, int]:
+        """
+        Get the chemical composition of the system.
+
+        Returns:
+            dict[str, int]: A dictionary where keys are chemical symbols (strings) and
+                            values are their respective counts (integers).
+        """
+        return dict(Counter(self.geometry.get_chemical_symbols()))
+
+class Nanocluster(VaspCalculation):
+
+    def __init__(self, directory: str | Path):
+        super().__init__(directory)
+
+    

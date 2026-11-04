@@ -30,6 +30,17 @@ def extract_outcar_property(
     Returns:
         float | None: The extracted property value, or None if the pattern 
         is missing, the file is empty, or an error occurs.
+
+    Raises:
+        ValueError: If the target pattern(s) are not found before reaching the beginning 
+            of the file, or if the file is completely empty.
+        FileNotFoundError: If the specified OUTCAR file does not exist at 'outcar_path'.
+        OSError: If a system-related error occurs while attempting to read the file chunks.
+        IndexError: If the line splitting inside 'extract_func' fails (e.g., empty string).
+        TypeError: If an invalid type is processed during the extraction or decoding steps.
+        
+        Note: These exceptions are caught internally by the function, converted into 
+        RuntimeWarning or UserWarning messages, and cause the function to return None.
     """
     # Normalize target_patterns to a list for unified processing
     if isinstance(target_patterns, str):
@@ -113,6 +124,16 @@ def parse_acf_file(
     Returns:
         np.ndarray | None: A 1D NumPy array of extracted values for each atom. 
         Returns None if the file is missing, malformed, or an error occurs.
+
+    Raises:
+        ValueError: If the file has 6 or fewer lines, rendering it too short to be a 
+            valid Bader ACF file, or if the string cannot be cast to a float.
+        IndexError: If any parsed data line lacks sufficient columns based on 'column_index'.
+        FileNotFoundError: If the ACF file cannot be found at the specified path.
+        TypeError: If an unexpected type is encountered during the iteration or casting process.
+        
+        Note: These exceptions are caught internally by the function, converted into 
+        RuntimeWarning or UserWarning messages, and cause the function to return None.
     """
     try:
         with open(acf_path, 'r') as f:

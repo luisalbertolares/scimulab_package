@@ -8,7 +8,7 @@ from scimulab.scimulab import VaspCalculation
 
 
 def test_vasp_calculation_vasprun():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     with open (os.path.join(path, 'energy.txt'), 'r') as f:
         energy_txt = float(f.read().strip())
@@ -22,7 +22,7 @@ def test_vasp_calculation_vasprun():
     assert isclose(vasp_calc.net_magmom, magmom_txt, abs_tol=0.0001)
 
 def test_vasp_calculation_oszicar():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     with open (os.path.join(path, 'energy.txt'), 'r') as f:
         energy_txt = float(f.read().strip())
@@ -37,7 +37,7 @@ def test_vasp_calculation_oszicar():
     assert isclose(vasp_calc.net_magmom, magmom_txt, abs_tol=0.0001)
 
 def test_vasp_calculation_outcar():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     with open (os.path.join(path, 'energy.txt'), 'r') as f:
         energy_txt = float(f.read().strip())
@@ -53,7 +53,7 @@ def test_vasp_calculation_outcar():
     assert isclose(vasp_calc.net_magmom, magmom_txt, abs_tol=0.0001)
 
 def test_vasp_calculation_geometry_vasprun():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     vasp_calc = VaspCalculation(path)
 
@@ -62,7 +62,7 @@ def test_vasp_calculation_geometry_vasprun():
                                                          'Co', 'Co', 'Co', 'Co', 'Co', 'Co']
 
 def test_vasp_calculation_geometry_poscar():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     vasp_calc = VaspCalculation(path)
     vasp_calc._vasprun_path = None
@@ -72,7 +72,7 @@ def test_vasp_calculation_geometry_poscar():
                                                          'Co', 'Co', 'Co', 'Co', 'Co', 'Co']
 
 def test_vasp_calculation_geometry_contcar():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     vasp_calc = VaspCalculation(path)
     vasp_calc._vasprun_path = None
@@ -83,15 +83,22 @@ def test_vasp_calculation_geometry_contcar():
                                                          'Co', 'Co', 'Co', 'Co', 'Co', 'Co']
 
 def test_vasp_calculation_acf_charge():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     vasp_calc = VaspCalculation(path)
 
     assert isclose(np.sum(vasp_calc.bader_charge), 131, abs_tol=0.1)
 
 def test_vasp_calculation_acf_mag():
-    path = '/mnt/i/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
 
     vasp_calc = VaspCalculation(path)
 
     assert isclose(np.sum(vasp_calc.bader_magmom), 13, abs_tol=0.1)
+
+def test_vasp_calculation_composition():
+    path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+
+    vasp_calc = VaspCalculation(path)
+
+    assert vasp_calc.composition == {'Au':7, 'Co':6}

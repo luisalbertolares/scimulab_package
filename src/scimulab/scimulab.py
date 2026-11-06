@@ -1,19 +1,28 @@
 import warnings
 from pathlib import Path
 from functools import cached_property
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
 import numpy as np
 from collections import Counter
 
-from ase import Atoms
 from ase.io import read, write
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.io.ase import AseAtomsAdaptor
 
 from .vasp_utils import extract_outcar_property, parse_acf_file
 
+if TYPE_CHECKING:
+    from ase import Atoms
+
 
 class VaspCalculation:
+    """
+    A class to encapsulate the results of a VASP calculation. It provides methods to 
+    extract key properties such as geometry, total energy, magnetic moment, and 
+    Bader charges/magnetic moments from the VASP output files.
+    """
 
     def __init__(self, directory: str | Path):
         self._directory = Path(directory)
@@ -301,6 +310,7 @@ class VaspCalculation:
                             values are their respective counts (integers).
         """
         return dict(Counter(self.geometry.get_chemical_symbols()))
+    
 
 class Nanocluster(VaspCalculation):
 

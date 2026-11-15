@@ -1,27 +1,22 @@
 import warnings
 from pathlib import Path
 from functools import cached_property
-from __future__ import annotations
-from typing import TYPE_CHECKING
 
 import numpy as np
 from collections import Counter
 
-from ase.io import read, write
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.io.ase import AseAtomsAdaptor
+from pymatgen.core import Structure
 
-from .vasp_utils import extract_outcar_property, parse_acf_file
-
-if TYPE_CHECKING:
-    from ase import Atoms
+from .vasp_utils import extract_outcar_property, extract_outcar_structure, parse_acf_file
 
 
-class VaspCalculation:
+class VaspParser:
     """
-    A class to encapsulate the results of a VASP calculation. It provides methods to 
-    extract key properties such as geometry, total energy, magnetic moment, and 
-    Bader charges/magnetic moments from the VASP output files.
+    A class to parse the results of a VASP calculation. It provides methods to 
+    extract key properties such as geometry, total energy and net magnetic moment 
+    from the VASP output files.
     """
 
     def __init__(self, directory: str | Path):
@@ -29,7 +24,7 @@ class VaspCalculation:
 
         if not self._directory.is_dir():
             raise FileNotFoundError(
-                f"The specified directory '{self._directory}' does not exist or is invalid"
+                f"The specified directory '{self._directory}' does not exist or is invalid."
             )
         
         self._vasprun_path: Path = self._directory / "vasprun.xml"
@@ -40,84 +35,9 @@ class VaspCalculation:
         self._doscar_path: Path = self._directory / "DOSCAR"
         self._acf_charge_path: Path = self._directory / "ACF_charge.dat"
         self._acf_mag_path: Path = self._directory / "ACF_mag.dat"
-
+    
     @cached_property
-    def geometry(self) -> Atoms:
-        """
-        Extracts the final atomic geometry from a VASP calculation directory.
-
-        Attempts to recover the geometry as an ASE Atoms object across three sequential stages:
-            1. vasprun.xml: Parses the structured XML file via Pymatgen and converts the 
-               last recorded structure into an ASE Atoms object.
-            2. POSCAR: Falls back to reading the initial geometry file using ASE.
-            3. CONTCAR: Falls back to reading the final geometry file using ASE.
-
-        Returns:
-            Atoms: The final geometry as an ASE Atoms object if successfully parsed.
-            None: If all stages fail due to missing, empty, or corrupted files.
-
-        Raises:
-            UserWarning/RuntimeWarning: Issued with the technical error message if a 
-                                        stage fails.
-        """
-        try:
-            # Extracting geometry from vasprun.xml without full parsing
-            vasprun = Vasprun(self._vasprun_path,
-                                parse_dos=False,
-                                parse_eigen=False,
-                                parse_projected_eigen=False,
-                                parse_potcar_file=False,
-                                ionic_step_skip=None,
-                                ionic_step_offset=-1
-            )
-            self._geometry = AseAtomsAdaptor.get_atoms(vasprun.structures[-1])
-            return self._geometry
-
-        except FileNotFoundError:
-            warnings.warn(
-                f"vasprun.xml file was not found. Trying POSCAR/CONTCAR.",
-                category=UserWarning,
-                stacklevel=2
-            )
-            
-        except Exception as e:
-            warnings.warn(
-                f"Error reading vasprun.xml ({e}). Trying POSCAR/CONTCAR.",
-                category=RuntimeWarning,
-                stacklevel=2
-            )
-
-        try:
-            self._geometry = read(self._poscar_path)
-            return self._geometry
-
-        except Exception:
-            pass
-        
-        try:
-            self._geometry = read(self._contcar_path)
-            return self._geometry
-
-        except FileNotFoundError:
-            warnings.warn(
-                f"Neither the POSCAR nor the CONTCAR file was found. No geometry could be recovered.",
-                category=UserWarning,
-                stacklevel=2
-            )
-            self._geometry = None
-            return None
-
-        except Exception as e:
-            warnings.warn(
-                f"Critical error processing POSCAR/CONTCAR ({e}). No geometry could be recovered.",
-                category=RuntimeWarning,
-                stacklevel=2
-            )
-            self._geometry = None
-            return None
-
-    @cached_property
-    def total_energy(self) -> float:
+    def total_energy(self) -> float | None:
         """
         Extracts the total energy from a VASP calculation directory.
 
@@ -128,8 +48,7 @@ class VaspCalculation:
                'energy(sigma->0)', avoiding high RAM usage on giant files.
 
         Returns:
-            float: The final total energy if successfully parsed, updates 'self._total_energy'.
-            None: If all stages fail due to missing, empty, or corrupted files.
+            float | None: The total energy if successfully parsed, None otherwise.
 
         Raises:
             UserWarning/RuntimeWarning: Issued with the technical error message if 
@@ -143,7 +62,6 @@ class VaspCalculation:
                                 parse_eigen=False,
                                 parse_projected_eigen=False,
                                 parse_potcar_file=False,
-                                ionic_step_skip=None,
                                 ionic_step_offset=-1
             )
             self._total_energy = float(vasprun.final_energy)
@@ -151,14 +69,14 @@ class VaspCalculation:
             
         except FileNotFoundError:
             warnings.warn(
-                f"vasprun.xml file was not found. Trying OSZICAR.",
+                "vasprun.xml file was not found. Trying OSZICAR to get the total energy.",
                 category=UserWarning,
                 stacklevel=2
             )
              
         except Exception as e:
             warnings.warn(
-                f"Error reading vasprun.xml ({e}). Trying OSZICAR.",
+                f"Error reading vasprun.xml ({e}). Trying OSZICAR to get the total energy.",
                 category=RuntimeWarning,
                 stacklevel=2
             )
@@ -171,14 +89,14 @@ class VaspCalculation:
 
         except FileNotFoundError:
             warnings.warn(
-                f"OSZICAR file was not found. Trying OUTCAR.",
+                "OSZICAR file was not found. Trying OUTCAR to get the total energy.",
                 category=UserWarning,
                 stacklevel=2
             )
 
         except Exception as e:
             warnings.warn(
-                f"Error reading OSZICAR ({e}). Trying OUTCAR.",
+                f"Error reading OSZICAR ({e}). Trying OUTCAR to get the total energy.",
                 category=RuntimeWarning,
                 stacklevel=2
             )
@@ -193,10 +111,18 @@ class VaspCalculation:
         if tot_energy is not None:
             self._total_energy = tot_energy
 
-        return getattr(self, '_total_energy', None)
+        else:
+            warnings.warn(
+                "Total energy could not be determined.",
+                category=UserWarning,
+                stacklevel=2
+            )
+            return None
+
+        return self._total_energy
 
     @cached_property
-    def net_magmom(self) -> float:
+    def net_magmom(self) -> float | None:
         """
         Extracts the final net magnetic moment from a VASP calculation directory.
 
@@ -212,8 +138,7 @@ class VaspCalculation:
             is inherently zero.
 
         Returns:
-            float: The final net magnetic moment if successfully parsed.
-            None: If all extraction stages fail due to missing or corrupted files.
+            float | None: The net magnetic moment if successfully parsed, None otherwise.
 
         Raises:
             UserWarning/RuntimeWarning: Issued with the technical error message if 
@@ -227,14 +152,14 @@ class VaspCalculation:
 
         except FileNotFoundError:
             warnings.warn(
-                f"OSZICAR file was not found. Trying OUTCAR.",
+                "OSZICAR file was not found. Trying OUTCAR to get the net magnetic moment.",
                 category=UserWarning,
                 stacklevel=2
             )
 
         except Exception as e:
             warnings.warn(
-                f"Error reading OSZICAR ({e}). Trying OUTCAR.",
+                f"Error reading OSZICAR ({e}). Trying OUTCAR to get the net magnetic moment.",
                 category=RuntimeWarning,
                 stacklevel=2
             )
@@ -248,7 +173,138 @@ class VaspCalculation:
         if magmom is not None:
             self._net_magmom = magmom
 
-        return getattr(self, '_net_magmom', None)
+        else:
+            warnings.warn(
+                "Net magnetic moment could not be determined.",
+                category=UserWarning,
+                stacklevel=2
+            )
+            return None
+
+        return self._net_magmom
+
+    @cached_property
+    def structure(self) -> Structure | None:
+        """
+        Creates a Pymatgen Structure object from the VASP calculation directory.
+
+        First, attempts to recover the geometry as a Pymatgen Structure object across three 
+        sequential stages:
+            1. vasprun.xml: Parses the structured XML file via Pymatgen and converts the 
+               last recorded structure into a Pymatgen Structure object.
+            2. POSCAR: Falls back to reading the geometry file using Pymatgen.
+            3. CONTCAR: Falls back to reading the geometry file using Pymatgen.
+            4. OUTCAR: As a last resort, attempts to extract the geometry from the OUTCAR 
+               file using a custom parser.
+
+        Then, attempts to recover the Bader charges and magnetic moments from the ACF files:
+            1. ACF_charge.dat: Parses the Bader charge output file and adds them as a site 
+               property to the Structure object.
+            2. ACF_mag.dat: Parses the Bader magnetic moment output file and adds them as a 
+               site property to the Structure object.
+
+        Returns:
+            Structure | None: A Pymatgen Structure object if successfully parsed, None otherwise.
+
+        Raises:
+            UserWarning/RuntimeWarning: Issued with the technical error message if a 
+                                        stage fails.
+        """
+        # 1. Extract geometry and create a Structure object (Pymatgen) 
+        try:
+            # Extracting geometry from vasprun.xml without full parsing
+            vasprun = Vasprun(self._vasprun_path,
+                                parse_dos=False,
+                                parse_eigen=False,
+                                parse_projected_eigen=False,
+                                parse_potcar_file=False,
+                                ionic_step_skip=None,
+                                ionic_step_offset=-1
+            )
+            self._structure = vasprun.structures[-1]
+
+        except FileNotFoundError:
+            warnings.warn(
+                "vasprun.xml file was not found. Trying POSCAR/CONTCAR to get the geometry.",
+                category=UserWarning,
+                stacklevel=2
+            )
+            
+        except Exception as e:
+            warnings.warn(
+                f"Error reading vasprun.xml ({e}). Trying POSCAR/CONTCAR to get the geometry.",
+                category=RuntimeWarning,
+                stacklevel=2
+            )
+
+        # Since vasprun.xml didn't work, we try to extract geometry from POSCAR/CONTCAR
+        try:
+            self._structure = Structure.from_file(self._poscar_path)
+
+        except Exception:
+            pass
+        
+        try:
+            self._structure = Structure.from_file(self._contcar_path)
+
+        except FileNotFoundError:
+            warnings.warn(
+                "Neither the POSCAR nor the CONTCAR file was found. Trying OUTCAR to get the geometry.",
+                category=UserWarning,
+                stacklevel=2
+            )
+
+        except Exception as e:
+            warnings.warn(
+                f"Error processing POSCAR/CONTCAR ({e}). Trying OUTCAR to get the geometry.",
+                category=RuntimeWarning,
+                stacklevel=2
+            )
+
+        # Since POSCAR/CONTCAR didn't work, we try to extract geometry from OUTCAR
+        structure = extract_outcar_structure(self._outcar_path)
+        if structure is not None:
+            self._structure = structure
+
+        else:
+            warnings.warn(
+                "Geometry could not be recovered. Structure object cannot be created.",
+                category=UserWarning,
+                stacklevel=2
+            )
+            return None
+
+        # 2. Extract Bader charges and introduce them as a property of the Structure object
+        q_bader = parse_acf_file(
+            acf_path=self._acf_charge_path
+        )
+        if q_bader is not None:
+            self._structure.add_site_property("bader_charge", q_bader)
+
+        else:
+            warnings.warn(
+                "Bader charge data could not be recovered. 'bader_charge' property "
+                "will not be added to the Structure object.",
+                category=UserWarning,
+                stacklevel=2
+            )
+
+        # 3. Extract Bader magnetic moments and introduce them as a property of the Structure object
+        mag_bader = parse_acf_file(
+            acf_path=self._acf_mag_path
+        )
+        if mag_bader is not None:
+            self._structure.add_site_property("bader_magmom", mag_bader)
+
+        else:
+            warnings.warn(
+                "Bader magnetic moment data could not be recovered. 'bader_magmom' property "
+                "will not be added to the Structure object.",
+                category=UserWarning,
+                stacklevel=2
+            )
+
+        return self._structure
 
     @cached_property
     def bader_charge(self) -> np.ndarray:
@@ -310,11 +366,3 @@ class VaspCalculation:
                             values are their respective counts (integers).
         """
         return dict(Counter(self.geometry.get_chemical_symbols()))
-    
-
-class Nanocluster(VaspCalculation):
-
-    def __init__(self, directory: str | Path):
-        super().__init__(directory)
-
-    

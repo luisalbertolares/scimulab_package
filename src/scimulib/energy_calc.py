@@ -1,11 +1,5 @@
-from __future__ import annotations
-from typing import TYPE_CHECKING
-
 import math
 import numpy as np
-
-if TYPE_CHECKING:
-    from ase import Atoms
 
 
 def cohesive_energy(total_energy: float, atomic_energies: dict[str, float], atom_counts: dict[str, int]) -> float:

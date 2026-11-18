@@ -37,7 +37,7 @@ class ChemicalEntity:
                 "structure attribute is not initialized as a pymatgen Structure object. "
                 f"'{site_prop_name}' property will not be added.",
                 category=UserWarning,
-                stacklevel=3,
+                stacklevel=2,
             )
             return
 
@@ -46,7 +46,7 @@ class ChemicalEntity:
                 f"Bader {data_name} data could not be recovered. '{site_prop_name}' "
                 "property will not be added to the Structure object.",
                 category=UserWarning,
-                stacklevel=3,
+                stacklevel=2,
             )
             return
 
@@ -56,7 +56,7 @@ class ChemicalEntity:
                 f"number of sites in Structure ({len(structure)}). '{site_prop_name}' "
                 "property will not be added.",
                 category=UserWarning,
-                stacklevel=3,
+                stacklevel=2,
             )
             return
 

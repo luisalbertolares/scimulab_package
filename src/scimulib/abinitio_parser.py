@@ -34,6 +34,15 @@ class VaspParser:
     """
 
     def __init__(self, directory: str | Path):
+        """
+        Initializes the VaspParser with the specified directory containing VASP output files.
+
+        Args:
+            directory (str | Path): The path to the directory containing VASP output files.
+
+        Raises:
+            NotADirectoryError: If the specified directory does not exist or is invalid.
+        """
         _check_pymatgen_imports()
         
         self._directory = Path(directory)
@@ -477,6 +486,16 @@ class BaderParser:
     """
 
     def __init__(self, directory: str | Path, expected_atoms: int | None = None):
+        """
+        Initializes the BaderParser with the specified directory containing Bader output files.
+
+        Args:
+            directory (str | Path): The path to the directory containing Bader output files.
+            expected_atoms (int | None, optional): The expected number of atoms.
+
+        Raises:
+            NotADirectoryError: If the specified directory does not exist or is invalid.
+        """
         self._directory = Path(directory)
         if not self._directory.is_dir():
             raise NotADirectoryError(

@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+import numpy as np
+
 from pymatgen.core import Structure
 
 from scimulib.abinitio_parser import VaspParser, BaderParser
@@ -8,12 +10,103 @@ from scimulib.exceptions import VaspExtractionError, BaderExtractionError
 
 
 class ChemicalEntity:
+    """
+    A class representing a chemical entity, encapsulating its name, total energy, 
+    net magnetic moment, and geometric structure. It also stores any additional 
+    site properties extracted from the calculation.
+    """
 
-    def __init__(self, name: str, total_energy: float, net_magmom: float, structure: Structure):
+    def __init__(
+            self, name: str, 
+            total_energy: float | None, 
+            net_magmom: float | None, 
+            structure: Structure | None
+    ):
+        """
+        Initializes a ChemicalEntity instance.
+
+        Args:
+            name (str): The name of the chemical entity.
+            total_energy (float | None): The total energy of the chemical entity.
+            net_magmom (float | None): The net magnetic moment of the chemical entity.
+            structure (Structure | None): The geometric structure of the chemical entity.
+        """
         self._name = name
         self._total_energy = total_energy
         self._net_magmom = net_magmom
         self._structure = structure
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__} (name={self._name}, "
+            f"formula={self._structure.composition.formula if self._structure else 'N/A'}, "
+            f"total_energy={self._total_energy if self._total_energy else 'N/A'}"
+        )
+
+    @property
+    def name(self) -> str:
+        """Returns the name of the chemical entity."""
+        return self._name
+
+    @property
+    def total_energy(self) -> float | None:
+        """Returns the total energy of the chemical entity."""
+        return self._total_energy
+
+    @property
+    def net_magmom(self) -> float | None:
+        """Returns the net magnetic moment of the chemical entity."""
+        return self._net_magmom
+
+    @property
+    def geometry(self) -> Structure | None:
+        """Returns the geometric structure of the chemical entity."""
+        if self._structure:
+            return Structure(
+                self._structure.lattice,
+                self._structure.species,
+                self._structure.frac_coords
+            )
+        else:
+            return None
+
+    @property
+    def fractional_coords(self) -> np.ndarray | None:
+        """
+        Returns the fractional coordinates of the structure as a 
+        numpy array, if available.
+        """
+        if self._structure:
+            return self._structure.frac_coords
+        else:
+            return None
+
+    @property
+    def cartesian_coords(self) -> np.ndarray | None:
+        """
+        Returns the Cartesian coordinates of the structure as a 
+        numpy array, if available.
+        """
+        if self._structure:
+            return self._structure.cart_coords
+        else:
+            return None
+    
+    @property
+    def bader_charges(self) -> np.ndarray | None:
+        """Returns the Bader charges as a numpy array, if available."""
+        if "bader_charge" in self._structure.site_properties:
+            return np.array(self._structure.site_properties["bader_charge"])
+        else:
+            return None
+
+    @property
+    def bader_magnetic_moments(self) -> np.ndarray | None:
+        """Returns the Bader magnetic moments as a numpy array, if available."""
+        if "bader_magmom" in self._structure.site_properties:
+            return np.array(self._structure.site_properties["bader_magmom"])
+        else:
+            return None
 
     @classmethod
     def from_vasp(cls, directory: str | Path, name: str = None):
@@ -41,7 +134,7 @@ class ChemicalEntity:
             ValueError: If neither the total energy nor the geometric structure 
                 could be extracted from the provided directory, making initialization 
                 impossible.
-                
+
         """
         entity_name = name if name is not None else directory.name
 

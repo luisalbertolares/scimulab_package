@@ -41,3 +41,17 @@ class PropertyNotFoundError(OutcarError):
 class StructureNotFoundError(OutcarError):
     """Exception raised when essential structural data (species, lattice, coords) is missing."""
     pass
+
+
+class BaderExtractionError(Exception):
+    """
+    Base exception for all errors related to the extraction of data from Bader analysis output files.
+    """
+    pass
+
+
+class AcfError(BaderExtractionError):
+    """
+    Exception raised for errors occurring during the parsing or extraction of data from Bader ACF files.
+    """
+    pass

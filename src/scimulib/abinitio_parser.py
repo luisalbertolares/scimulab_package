@@ -9,8 +9,8 @@ import numpy as np
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.core import Structure, Lattice
 
-from scimulib.exceptions import VasprunError, OszicarError, OutcarError, \
-    PropertyNotFoundError, StructureNotFoundError
+from scimulib.exceptions import VaspExtractionError, VasprunError, OszicarError, OutcarError, \
+    PropertyNotFoundError, StructureNotFoundError, BaderExtractionError, AcfError
 
 
 def _check_pymatgen_imports():
@@ -34,9 +34,9 @@ class VaspParser:
     """
 
     def __init__(self, directory: str | Path):
-        self._directory = Path(directory)
-
         _check_pymatgen_imports()
+        
+        self._directory = Path(directory)
         if not self._directory.is_dir():
             raise NotADirectoryError(
                 f"The specified directory '{self._directory}' does not exist or is invalid."
@@ -50,7 +50,7 @@ class VaspParser:
         self._doscar_path: Path = self._directory / "DOSCAR"
 
         self._vasprun: Vasprun | None = None
-        self._vasprun_params: dict = None
+        self._vasprun_params: dict = {}
         self._oszcicar: Oszicar | None = None
 
     def load_vasprun(self, ionic_step_offset=-1, ionic_step_skip=None, occu_tol=1e-8, 
@@ -343,7 +343,7 @@ class VaspParser:
         except Exception as e:
             raise OutcarError(f"Failed to instantiate pymatgen Structure: {e}") from e
         
-    def get_total_energy(self) -> float | None:
+    def get_total_energy(self) -> float:
         """
         Extracts the total energy from the final ionic step of a VASP calculation.
 
@@ -354,7 +354,11 @@ class VaspParser:
                'energy(sigma->0)', avoiding high RAM usage on giant files.
 
         Returns:
-            float | None: The total energy if successfully parsed, None otherwise.
+            float: The total energy if successfully parsed.
+
+        Raises:
+            VaspExtractionError: If the total energy cannot be extracted from any 
+                of the VASP output files.
         """
         try:
             return float(self.load_vasprun().final_energy)
@@ -374,10 +378,11 @@ class VaspParser:
         except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
             logging.warning(f"OUTCAR failed to provide total energy ({type(e).__name__}).")
 
-        logging.error(f"Unable to extract total energy in: {self._directory}")
-        return None
+        raise VaspExtractionError(
+            f"Unable to extract final energy from any VASP output files in: {self._directory}."
+        )
 
-    def get_net_magmom(self) -> float | None:
+    def get_net_magmom(self) -> float:
         """
         Extracts the final net magnetic moment from a VASP calculation directory.
 
@@ -393,7 +398,11 @@ class VaspParser:
             is inherently zero.
 
         Returns:
-            float | None: The net magnetic moment if successfully parsed, None otherwise.
+            float: The net magnetic moment if successfully parsed.
+
+        Raises:
+            VaspExtractionError: If the net magnetic moment cannot be extracted from 
+                any of the VASP output files.
         """
         try:
             return float(self.load_oszicar().ionic_steps[-1]['mag'])
@@ -408,10 +417,11 @@ class VaspParser:
         except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
             logging.warning(f"OUTCAR failed to provide net magnetic moment ({type(e).__name__}).")
 
-        logging.error(f"Unable to extract net magnetic moment in: {self._directory}")
-        return None
+        raise VaspExtractionError(
+            f"Unable to extract net magnetic moment from any VASP output files in: {self._directory}."
+        )
 
-    def get_structure(self) -> Structure | None:
+    def get_structure(self) -> Structure:
         """
         Creates a Pymatgen Structure object from the VASP calculation directory.
 
@@ -425,7 +435,11 @@ class VaspParser:
                file using a custom parser.
 
         Returns:
-            Structure | None: A Pymatgen Structure object if successfully parsed, None otherwise.
+            Structure: A Pymatgen Structure object if successfully parsed.
+
+        Raises:
+            VaspExtractionError: If the geometry cannot be extracted from 
+                any of the VASP output files.
         """
         try:
             return self.load_vasprun().structures[-1]
@@ -450,8 +464,9 @@ class VaspParser:
         except (FileNotFoundError, OutcarError, StructureNotFoundError) as e:
             logging.warning(f"OUTCAR failed to provide geometry ({type(e).__name__}).")
 
-        logging.error(f"Unable to extract geometry in: {self._directory}")
-        return None
+        raise VaspExtractionError(
+            f"Unable to extract geometry from any VASP output files in: {self._directory}."
+        )
 
 
 class BaderParser:
@@ -461,170 +476,122 @@ class BaderParser:
     moments from the corresponding ACF files generated by the Bader analysis.
     """
 
-    FILE_MAP = {
-        "charge": ["ACF.dat", "ACF_charge.dat"],
-        "magmom": ["ACF_mag.dat"]
-    }
-
-    def __init__(self, directory: str | Path):
+    def __init__(self, directory: str | Path, expected_atoms: int | None = None):
         self._directory = Path(directory)
-
         if not self._directory.is_dir():
-            raise FileNotFoundError(
+            raise NotADirectoryError(
                 f"The specified directory '{self._directory}' does not exist or is invalid."
             )
 
+        self._acf_path = self._directory / "ACF.dat"
+        self._acf_charge_path = self._directory / "ACF_charge.dat"
+        self._acf_mag_path = self._directory / "ACF_mag.dat"
+
+        self._expected_atoms = expected_atoms
+
     @staticmethod
     def parse_acf_file(acf_path: str | Path, 
-                        column_index: int = 4, 
-                        expected_atoms: int | None = None
-    ) -> np.ndarray | None:
+                       column_index: int = 4, 
+                       expected_atoms: int | None = None
+        ) -> np.ndarray:
         """
         Parses a Bader ACF file to extract a specific column of atomic properties 
         (e.g., charge, volume, or magnetic moment) as a NumPy array.
 
-        Bader ACF files typically contain 2 header lines and 4 footer lines. 
-        The atomic data is located between these blocks.
-
         Args:
-            acf_path (str | Path): The full path to the ACF file (e.g., 'ACF.dat').
+            acf_path (str | Path): The full path to the ACF file.
             column_index (int): The zero-based index of the column to extract. 
-                Defaults to 4 (corresponds to CHARGE in ACF.dat).
             expected_atoms (int | None, optional): The expected number of atoms.
 
         Returns:
-            np.ndarray | None: A 1D NumPy array of extracted values for each atom. 
-            Returns None if the file is missing, malformed, or an error occurs.
+            np.ndarray: A 1D NumPy array of extracted values for each atom. 
 
         Raises:
-            ValueError: If the file has 6 or fewer lines, rendering it too short to be a 
-                valid Bader ACF file, or if the string cannot be cast to a float.
-            IndexError: If any parsed data line lacks sufficient columns based on 'column_index'.
             FileNotFoundError: If the ACF file cannot be found at the specified path.
-            TypeError: If an unexpected type is encountered during the iteration or casting process.
-            
-            Note: These exceptions are caught internally by the function, converted into 
-            RuntimeWarning or UserWarning messages, and cause the function to return None.
+            AcfError: If the file is malformed or data extraction fails.
         """
+        acf_path = Path(acf_path)
+        if not acf_path.is_file():
+            raise FileNotFoundError(f"ACF file not found at {acf_path}.")
+
         try:
-            with open(acf_path, 'r') as f:
+            with open(acf_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
+        except OSError as e:
+            raise AcfError(f"System error while reading ACF file at {acf_path}.") from e
             
-            if len(lines) <= 6:
-                raise ValueError("File is too short to be a valid Bader ACF file.")
+        if len(lines) <= 6:
+            raise AcfError(f"File {acf_path.name} is too short to be a valid ACF file.")
                 
-            extracted_values = []
+        extracted_values = []
+        for i, line in enumerate(lines[2:-4], start=3):
+            parts = line.split()
+            try:
+                extracted_values.append(float(parts[column_index]))
+            except IndexError as e:
+                raise AcfError(f"Line {i} lacks sufficient columns in {acf_path.name}.") from e
+            except ValueError as e:
+                raise AcfError(f"Failed to parse numeric value at line {i} in {acf_path.name}.") from e
             
-            for i, line in enumerate(lines[2:-4], start=3):
-                parts = line.split()
-                if len(parts) > column_index:
-                    extracted_values.append(float(parts[column_index]))
-                else:
-                    raise IndexError(
-                        f"Line {i} lacks sufficient columns (expected at least {column_index + 1})."
-                    )
-            
-            if expected_atoms is not None and len(extracted_values) != expected_atoms:
-                warnings.warn(
-                    f"Atom count mismatch in {acf_path}: Expected {expected_atoms}, "
-                    f"but found {len(extracted_values)}.",
-                    category=UserWarning,
-                    stacklevel=2
-                )
-                return None
+        if expected_atoms is not None and len(extracted_values) != expected_atoms:
+            raise AcfError(
+                f"Atom count mismatch in {acf_path.name}: Expected {expected_atoms}, "
+                f"but found {len(extracted_values)}."
+            )
                 
-            return np.array(extracted_values, dtype=float)
-            
-        except FileNotFoundError:
-            warnings.warn(
-                f"ACF file was not found at {acf_path}.",
-                category=UserWarning,
-                stacklevel=2
-            )
-            return None
-            
-        except (ValueError, IndexError, TypeError) as e:
-            warnings.warn(
-                f"Failed to parse ACF file at {acf_path}: {e}",
-                category=RuntimeWarning,
-                stacklevel=2
-            )
-            return None
-
-    def get_bader_property(self, property: str) -> np.ndarray | None:
-        """
-        Extracts a specific Bader analysis property by locating and parsing the corresponding ACF file.
-
-        This method checks the target directory for files associated with the 
-        requested property (as defined in 'FILE_MAP'). If a matching file is found, 
-        it parses and returns the data. If no valid file exists, it issues a warning 
-        and returns 'None'.
-
-        Args:
-            property (str): The Bader property to extract. Must be a valid 
-                key defined in 'FILE_MAP' (e.g., 'charge', 'magmom').
-
-        Returns:
-            np.ndarray | None: A NumPy array containing the parsed property values, 
-            or 'None' if the corresponding ACF file is not found in the directory.
-
-        Raises:
-            ValueError: If the requested 'property' is not a recognized key in 'FILE_MAP'.
-        """
-        # Validate the requested property against the expetected ones in FILE_MAP
-        if property not in self.FILE_MAP:
-            warnings.warn(
-                f"Invalid property '{property}' requested. "
-                f"Expected one of: {list(self.FILE_MAP.keys())}.",
-                category=UserWarning,
-                stacklevel=2
-            )
-
-        # List of potential ACF files for the requested property
-        possible_acf_files = self.FILE_MAP[property]
-
-        # Attempt to locate the first existing ACF file in the directory
-        acf_path = next(
-        (self.directory / fname for fname in possible_acf_files if (self.directory / fname).is_file()), 
-        None
-        )
-
-        if acf_path is None:
-            warnings.warn(
-                f"No {possible_acf_files} found for property '{property}' in directory '{self.directory}'. "
-                "No Bader property could be extracted.",
-                category=UserWarning,
-                stacklevel=2
-            )
-            return None
-
-        return self.parse_acf_file(acf_path=acf_path)
+        return np.array(extracted_values, dtype=float)
 
     def get_charges(self) -> np.ndarray:
         """
-        Wraps the get_bader_property method to extract the Bader charges specifically. 
+        Wraps the `parse_acf_file` method to extract the Bader charges. First attempts to read 
+        from 'ACF_charge.dat', and if that file is missing, falls back to 'ACF.dat'. It expects 
+        the charge to be in the 5th column (index 4).
 
         Returns:
             np.ndarray: A 1D NumPy array containing the Bader charge for each atom.
-            None: If the ACF charge file is missing, empty, or corrupted.
 
         Raises:
-            UserWarning/RuntimeWarning: Issued by the underlying parser if the file 
-                                        is missing or malformed.
+            BaderExtractionError: If neither ACF file is found or if the extraction fails.
         """
-        return self.get_bader_property(property="charge")
+        target_path = self._acf_charge_path if self._acf_charge_path.is_file() else self._acf_path
 
-    def get_magmoms(self) -> np.ndarray:
+        try:
+            return self.parse_acf_file(
+                target_path, 
+                column_index=4, 
+                expected_atoms=self._expected_atoms
+            )
+        except (FileNotFoundError, AcfError) as e:
+            logging.warning(
+                f"Failed to extract charges from {target_path.name} ({type(e).__name__})."
+            )
+
+        raise BaderExtractionError(
+            f"Unable to extract Bader charges from ACF file in: {self._directory}."
+        )
+
+    def get_magnetic_moments(self) -> np.ndarray:
         """
-        Wraps the get_bader_property method to extract the Bader magnetic moments 
-        specifically. 
+        Wraps the `parse_acf_file` method to extract the Bader magnetic moments. It reads from 
+        'ACF_mag.dat' and expects the magnetic moment to be in the 5th column (index 4).
 
         Returns:
-            np.ndarray: A 1D NumPy array containing the magnetic moment for each atom.
-            None: If the ACF magnetic file is missing, empty, or corrupted.
+            np.ndarray: A 1D NumPy array containing the Bader magnetic moment for each atom.
 
         Raises:
-            UserWarning/RuntimeWarning: Issued by the underlying parser if the file 
-                                        is missing or malformed.
+            BaderExtractionError: If the magnetic moments cannot be extracted from the ACF file.
         """
-        return self.get_bader_property(property="magmom")
+        try:
+            return self.parse_acf_file(
+                self._acf_mag_path, 
+                column_index=4, 
+                expected_atoms=self._expected_atoms
+            )
+        except (FileNotFoundError, AcfError) as e:
+            logging.warning(
+                f"Failed to extract magnetic moments from {self._acf_mag_path.name} ({type(e).__name__})."
+            )
+
+        raise BaderExtractionError(
+            f"Unable to extract Bader magnetic moments from ACF file in: {self._directory}."
+        )

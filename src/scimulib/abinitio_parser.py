@@ -60,7 +60,7 @@ class VaspParser:
 
         self._vasprun: Vasprun | None = None
         self._vasprun_params: dict = {}
-        self._oszcicar: Oszicar | None = None
+        self._oszicar: Oszicar | None = None
 
     def extract_vasprun_property(self, 
                                  property_name, 
@@ -159,9 +159,9 @@ class VaspParser:
         if not self._oszicar_path.is_file():
             raise FileNotFoundError(f"OSZICAR file not found at {self._oszicar_path}.")
 
-        if self._oszcicar is None:
+        if self._oszicar is None:
             try:
-                self._oszcicar = Oszicar(self._oszicar_path)
+                self._oszicar = Oszicar(self._oszicar_path)
             except Exception as e:
                 raise OszicarError(
                     f"Internal pymatgen failure in Oszicar: {type(e).__name__} - {e}"
@@ -199,19 +199,19 @@ class VaspParser:
 
         if step_type == "ionic":
             try:
-                step_dict = self._oszcicar.ionic_steps[ionic_step_number]
+                step_dict = self._oszicar.ionic_steps[ionic_step_number]
             except IndexError as e:
                 raise OszicarError(
                     f"Ionic step number {ionic_step_number} is out of bounds. "
-                    f"Total available ionic steps: {len(self._oszcicar.ionic_steps)}"
+                    f"Total available ionic steps: {len(self._oszicar.ionic_steps)}"
                 ) from e
         else:
             try:
-                e_steps_list = self._oszcicar.electronic_steps[ionic_step_number]
+                e_steps_list = self._oszicar.electronic_steps[ionic_step_number]
             except IndexError as e:
                 raise OszicarError(
                     f"Ionic step number {ionic_step_number} is out of bounds. "
-                    f"Total available ionic steps: {len(self._oszcicar.electronic_steps)}"
+                    f"Total available ionic steps: {len(self._oszicar.electronic_steps)}"
                 ) from e
             
             try:

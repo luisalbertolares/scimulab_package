@@ -33,16 +33,6 @@ class OutcarError(VaspExtractionError):
     pass
 
 
-class PropertyNotFoundError(OutcarError):
-    """Exception raised when the target property pattern is not found in the OUTCAR file."""
-    pass
-
-
-class StructureNotFoundError(OutcarError):
-    """Exception raised when essential structural data (species, lattice, coords) is missing."""
-    pass
-
-
 class BaderExtractionError(Exception):
     """
     Base exception for all errors related to the extraction of data from Bader analysis output files.

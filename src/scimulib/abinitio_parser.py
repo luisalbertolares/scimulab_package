@@ -10,7 +10,7 @@ from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.core import Structure, Lattice
 
 from scimulib.exceptions import VaspExtractionError, VasprunError, OszicarError, OutcarError, \
-    PropertyNotFoundError, StructureNotFoundError, BaderExtractionError, AcfError
+    BaderExtractionError, AcfError
 
 
 def _check_pymatgen_imports():
@@ -43,6 +43,7 @@ class VaspParser:
         Raises:
             NotADirectoryError: If the specified directory does not exist or is invalid.
         """
+        # First, check if the required pymatgen classes are available.
         _check_pymatgen_imports()
         
         self._directory = Path(directory)
@@ -110,6 +111,8 @@ class VaspParser:
             "exception_on_bad_xml": exception_on_bad_xml
         }
 
+        # If the Vasprun object has not been initialized or the 
+        # parameters have changed, re-parse the file.
         if self._vasprun is None or self._vasprun_params != current_params:
             try:
                 self._vasprun = Vasprun(self._vasprun_path, **current_params)
@@ -139,13 +142,18 @@ class VaspParser:
         """
         Loads the OSZICAR file using Pymatgen's Oszicar class and extracts a specific 
         property from a given ionic or electronic step.
+        For ionic steps, valid properties are: 'free_energy', 'energy_without_entropy', 
+        'delta_energy', 'temperature', 'magnetization'.
+        For electronic steps, valid properties are: 'energy', 'delta_energy', 'deps', 
+        'rms', 'rms_c', 'iterations'.
 
         Args:
             step_type (str): The type of step to query, either 'ionic' or 'electronic'.
             property_name (str): The plain English name of the property to extract.
-            ionic_step_number (int): The index of the ionic step to query. Defaults to -1 (the last step).
-            electronic_step_number (int): The index of the electronic step to query (only used if 
-                step_type is 'electronic'). Defaults to -1 (the last step).
+            ionic_step_number (int): The index of the ionic step to query. Defaults 
+                to -1 (the last step).
+            electronic_step_number (int): The index of the electronic step to query 
+                (only used if step_type is 'electronic'). Defaults to -1 (the last step).
 
         Returns:
             Any: The requested property from the specified step.
@@ -227,8 +235,7 @@ class VaspParser:
             return step_dict[pymatgen_key]
         except KeyError as e:
             raise OszicarError(
-                f"The OSZICAR file was loaded, but the expected key '{pymatgen_key}' "
-                f"was not found in the requested step."
+                f"The expected key '{pymatgen_key}' was not found in the requested step."
             ) from e
 
     def extract_outcar_property(
@@ -265,12 +272,15 @@ class VaspParser:
         if not self._outcar_path.is_file():
             raise FileNotFoundError(f"OUTCAR file not found at {self._outcar_path}.")
 
+        # Ensure target_patterns is a list for consistent processing.
         if isinstance(target_patterns, str):
             target_patterns = [target_patterns]
-            
+
+        # Size of 8 KB for each chunk read from the file.
         chunk_size = 8192
         
         try:
+            # Open the OUTCAR file in binary mode for efficient backward reading.
             with open(self._outcar_path, 'rb') as f:
                 f.seek(0, os.SEEK_END)
                 position = f.tell()
@@ -296,7 +306,8 @@ class VaspParser:
                                     return extract_func(decoded_line)
                                 except (IndexError, ValueError, TypeError) as e:
                                     raise OutcarError(
-                                        f"Failed to parse the value for '{property_name}' using the extraction function."
+                                        f"Failed to parse the value for '{property_name}' "
+                                        "using the extraction function."
                                     ) from e
 
                 if buffer:
@@ -306,13 +317,16 @@ class VaspParser:
                             return extract_func(decoded_line)
                         except (IndexError, ValueError, TypeError) as e:
                             raise OutcarError(
-                                f"Failed to parse the value for '{property_name}' using the extraction function."
+                                f"Failed to parse the value for '{property_name}' "
+                                "using the extraction function."
                             ) from e
                             
         except OSError as e:
-            raise OutcarError(f"System error while reading OUTCAR at {self._outcar_path}.") from e
+            raise OutcarError(
+                f"System error while reading OUTCAR at {self._outcar_path}."
+            ) from e
 
-        raise PropertyNotFoundError(
+        raise OutcarError(
             f"Pattern(s) {target_patterns} not found for '{property_name}'. "
             "File may be empty, incomplete, or the calculation did not reach this step."
         )
@@ -331,7 +345,8 @@ class VaspParser:
            positions are found, the corresponding data block is instantly parsed.
 
         Returns:
-            Structure: A pymatgen Structure object representing the final ionic step of the calculation.
+            Structure: A pymatgen Structure object representing the final ionic step 
+                of the calculation.
 
         Raises:
             FileNotFoundError: If the specified OUTCAR file does not exist.
@@ -345,7 +360,8 @@ class VaspParser:
 
         species_names = []
         num_ions = []
-        
+
+        # Phase 1: Fast forward scan to extract species and number of ions from the header.
         try:
             with open(self._outcar_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for _ in range(5000):
@@ -365,20 +381,23 @@ class VaspParser:
             raise OutcarError(f"System error reading header of OUTCAR at {self._outcar_path}.") from e
                     
         if not species_names or not num_ions:
-            raise StructureNotFoundError(
+            raise OutcarError(
                 "Could not find 'VRHFIN' or 'ions per type' in the header. File may be empty or invalid."
             )
             
         species = []
         for name, count in zip(species_names, num_ions):
             species.extend([name] * count)
-            
+
+        # Phase 2: Backward scan to extract lattice vectors and atomic positions.
         total_atoms = sum(num_ions)
         chunk_size = 16384
         lattice_matrix = None
         cart_coords = None
         history = deque(maxlen=max(total_atoms + 50, 1000))
-        
+
+        # Open the OUTCAR file in binary mode and read it backward in 
+        # chunks to find the required information.
         try:
             with open(self._outcar_path, 'rb') as f:
                 f.seek(0, os.SEEK_END)
@@ -401,22 +420,35 @@ class VaspParser:
                             decoded_line = line_bytes.decode('utf-8', errors='ignore')
                             history.appendleft(decoded_line)
                             
-                            if "direct lattice vectors" in decoded_line and lattice_matrix is None:
+                            if ("direct lattice vectors" in decoded_line 
+                                and lattice_matrix is None
+                            ):
                                 try:
                                     lat_matrix = []
                                     for i in range(1, 4):
                                         parts = history[i].split()
-                                        lat_matrix.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                                        lat_matrix.append(
+                                            [float(parts[0]), 
+                                             float(parts[1]), 
+                                             float(parts[2])]
+                                        )
                                     lattice_matrix = lat_matrix
                                 except (IndexError, ValueError):
                                     pass 
                                     
-                            elif "POSITION" in decoded_line and "TOTAL-FORCE" in decoded_line and cart_coords is None:
+                            elif ("POSITION" in decoded_line 
+                                  and "TOTAL-FORCE" in decoded_line 
+                                  and cart_coords is None
+                            ):
                                 try:
                                     coords = []
                                     for i in range(2, 2 + total_atoms):
                                         parts = history[i].split()
-                                        coords.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                                        coords.append(
+                                            [float(parts[0]), 
+                                             float(parts[1]), 
+                                             float(parts[2])]
+                                        )
                                     cart_coords = coords
                                 except (IndexError, ValueError):
                                     pass 
@@ -427,10 +459,11 @@ class VaspParser:
                     if lattice_matrix is not None and cart_coords is not None:
                         break
         except OSError as e:
-            raise OutcarError(f"System error during backward scan of OUTCAR at {self._outcar_path}.") from e
+            raise OutcarError(f"System error during backward scan of OUTCAR "
+                              f"at {self._outcar_path}.") from e
                     
         if lattice_matrix is None or cart_coords is None:
-            raise StructureNotFoundError(
+            raise OutcarError(
                 "Failed to extract lattice vectors or coordinates in the backward scan. "
                 "The calculation may have crashed before writing structural data."
             )
@@ -486,7 +519,7 @@ class VaspParser:
                 target_patterns="energy(sigma->0)",
                 property_name="total energy"
             )
-        except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
+        except (FileNotFoundError, OutcarError) as e:
             logging.warning(
                 f"OUTCAR failed to provide total energy ({type(e).__name__} - {e})."
             )
@@ -533,7 +566,7 @@ class VaspParser:
                 target_patterns=["magnetization", "number of electron"],
                 property_name="net magnetic moment"
             )
-        except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
+        except (FileNotFoundError, OutcarError) as e:
             logging.warning(
                 f"OUTCAR failed to provide net magnetic moment ({type(e).__name__} - {e})."
             )
@@ -583,7 +616,7 @@ class VaspParser:
 
         try:
             return self.extract_outcar_structure()
-        except (FileNotFoundError, OutcarError, StructureNotFoundError) as e:
+        except (FileNotFoundError, OutcarError) as e:
             logging.warning(f"OUTCAR failed to provide geometry ({type(e).__name__}).")
 
         raise VaspExtractionError(

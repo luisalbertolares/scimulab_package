@@ -62,14 +62,23 @@ class VaspParser:
         self._vasprun_params: dict = {}
         self._oszcicar: Oszicar | None = None
 
-    def load_vasprun(self, ionic_step_offset=-1, ionic_step_skip=None, occu_tol=1e-8, 
-                     parse_dos=False, parse_eigen=False, parse_projected_eigen=False, 
-                     parse_potcar_file=False, exception_on_bad_xml=True):
+    def extract_vasprun_property(self, 
+                                 property_name, 
+                                 ionic_step_offset=-1, 
+                                 ionic_step_skip=None, 
+                                 occu_tol=1e-8, 
+                                 parse_dos=False, 
+                                 parse_eigen=False, 
+                                 parse_projected_eigen=False, 
+                                 parse_potcar_file=False, 
+                                 exception_on_bad_xml=True
+    ):
         """
-        Loads the vasprun.xml file using Pymatgen's Vasprun class. 
+        Loads the vasprun.xml file using Pymatgen's `Vasprun` class and extracts a specific property.
         Re-parses the file if the requested parameters change.
 
         Args:
+            property_name (str): Specific attribute to extract from the Vasprun object.
             ionic_step_offset (int): Offset to read only a subset of ionic steps.
             ionic_step_skip (int | None): Number of ionic steps to skip.
             occu_tol (float): Tolerance for determining if occupancies are fractional.
@@ -80,12 +89,12 @@ class VaspParser:
             exception_on_bad_xml (bool): Whether to throw an exception if the XML is malformed.
 
         Returns:
-            Vasprun: An instance of the Vasprun class containing parsed data.
+            Any: The requested property extracted from the Vasprun object.
 
         Raises:
             FileNotFoundError: If the vasprun.xml file does not exist in the specified directory.
-            VasprunError: If the vasprun.xml file cannot be parsed due to internal Pymatgen 
-                errors or corruption.
+            VasprunError: If the file cannot be parsed, if the requested property does not exist,
+                or if an unexpected error occurs during extraction.
         """
         if not self._vasprun_path.is_file():
             raise FileNotFoundError(f"vasprun.xml file not found at {self._vasprun_path}.")
@@ -110,20 +119,42 @@ class VaspParser:
                     f"Internal pymatgen failure in Vasprun: {type(e).__name__} - {e}"
                 ) from e
 
-        return self._vasprun
+        try:
+            return float(getattr(self._vasprun, property_name))
+        except AttributeError as e:
+            raise VasprunError(
+                f"Attribute '{property_name}' does not exist in Vasprun object."
+            ) from e
+        except TypeError as e:
+            raise VasprunError(
+                f"Property '{property_name}' is not a scalar value"
+            ) from e
 
-    def load_oszicar(self):
+    def extract_oszicar_property(self, 
+                                 step_type, 
+                                 property_name, 
+                                 ionic_step_number=-1, 
+                                 electronic_step_number=-1
+    ):
         """
-        Loads the OSZICAR file using Pymatgen's Oszicar class. 
+        Loads the OSZICAR file using Pymatgen's Oszicar class and extracts a specific 
+        property from a given ionic or electronic step.
+
+        Args:
+            step_type (str): The type of step to query, either 'ionic' or 'electronic'.
+            property_name (str): The plain English name of the property to extract.
+            ionic_step_number (int): The index of the ionic step to query. Defaults to -1 (the last step).
+            electronic_step_number (int): The index of the electronic step to query (only used if 
+                step_type is 'electronic'). Defaults to -1 (the last step).
 
         Returns:
-            Oszicar: An instance of the Oszicar class containing parsed data.
+            Any: The requested property from the specified step.
 
         Raises:
-            FileNotFoundError: If the OSZICAR file does not exist in the specified directory.
-
-            OszicarError: If the OSZICAR file cannot be parsed due to internal Pymatgen 
-                errors or corruption.
+            FileNotFoundError: If the OSZICAR file does not exist.
+            OszicarError: If the OSZICAR file cannot be parsed, if the step_type or 
+                property_name are invalid, if the step indices are out of bounds, or 
+                if the mapped key is missing in the Pymatgen step dictionary.
         """
         if not self._oszicar_path.is_file():
             raise FileNotFoundError(f"OSZICAR file not found at {self._oszicar_path}.")
@@ -136,7 +167,69 @@ class VaspParser:
                     f"Internal pymatgen failure in Oszicar: {type(e).__name__} - {e}"
                 ) from e
 
-        return self._oszcicar
+        PROPERTY_MAPPING = {
+            "ionic": {
+                "free_energy": "F",
+                "energy_without_entropy": "E0",
+                "delta_energy": "d E",
+                "temperature": "T",
+                "magnetization": "mag"
+            },
+            "electronic": {
+                "energy": "E",
+                "delta_energy": "dE",
+                "deps": "deps",
+                "rms": "rms",
+                "rms_c": "rms(c)",
+                "iterations": "N"
+            }
+        }
+
+        if step_type not in PROPERTY_MAPPING:
+            raise OszicarError(
+                f"Invalid step_type '{step_type}'. Must be either 'ionic' or 'electronic'."
+            )
+
+        pymatgen_key = PROPERTY_MAPPING[step_type].get(property_name)
+        if pymatgen_key is None:
+            raise OszicarError(
+                f"Property '{property_name}' is not supported for '{step_type}' steps. "
+                f"Available properties are: {list(PROPERTY_MAPPING[step_type].keys())}"
+            )
+
+        if step_type == "ionic":
+            try:
+                step_dict = self._oszcicar.ionic_steps[ionic_step_number]
+            except IndexError as e:
+                raise OszicarError(
+                    f"Ionic step number {ionic_step_number} is out of bounds. "
+                    f"Total available ionic steps: {len(self._oszcicar.ionic_steps)}"
+                ) from e
+        else:
+            try:
+                e_steps_list = self._oszcicar.electronic_steps[ionic_step_number]
+            except IndexError as e:
+                raise OszicarError(
+                    f"Ionic step number {ionic_step_number} is out of bounds. "
+                    f"Total available ionic steps: {len(self._oszcicar.electronic_steps)}"
+                ) from e
+            
+            try:
+                step_dict = e_steps_list[electronic_step_number]
+            except IndexError as e:
+                raise OszicarError(
+                    f"Electronic step number {electronic_step_number} is out of bounds for "
+                    f"ionic step {ionic_step_number}. "
+                    f"Total available electronic steps in this ionic step: {len(e_steps_list)}"
+                ) from e
+
+        try:
+            return step_dict[pymatgen_key]
+        except KeyError as e:
+            raise OszicarError(
+                f"The OSZICAR file was loaded, but the expected key '{pymatgen_key}' "
+                f"was not found in the requested step."
+            ) from e
 
     def extract_outcar_property(
             self, 
@@ -370,14 +463,23 @@ class VaspParser:
                 of the VASP output files.
         """
         try:
-            return float(self.load_vasprun().final_energy)
-        except (FileNotFoundError, VasprunError, AttributeError, TypeError) as e:
-            logging.warning(f"vasprun.xml failed to provide total energy ({type(e).__name__}). Trying OSZICAR.")
+            return self.extract_vasprun_property("final_energy")
+        except (FileNotFoundError, VasprunError) as e:
+            logging.warning(
+                f"vasprun.xml failed to provide total energy "
+                f"({type(e).__name__} - {e}). Trying OSZICAR."
+            )
 
         try:
-            return float(self.load_oszicar().ionic_steps[-1]['E0'])
-        except (FileNotFoundError, OszicarError, AttributeError, IndexError, KeyError, TypeError) as e:
-            logging.warning(f"OSZICAR failed to provide total energy ({type(e).__name__}). Trying OUTCAR.")
+            return self.extract_oszicar_property(
+                step_type="ionic", 
+                property_name="energy_without_entropy"
+            )
+        except (FileNotFoundError, OszicarError) as e:
+            logging.warning(
+                f"OSZICAR failed to provide total energy "
+                f"({type(e).__name__} - {e}). Trying OUTCAR."
+            )
 
         try:
             return self.extract_outcar_property(
@@ -385,7 +487,9 @@ class VaspParser:
                 property_name="total energy"
             )
         except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
-            logging.warning(f"OUTCAR failed to provide total energy ({type(e).__name__}).")
+            logging.warning(
+                f"OUTCAR failed to provide total energy ({type(e).__name__} - {e})."
+            )
 
         raise VaspExtractionError(
             f"Unable to extract final energy from any VASP output files in: {self._directory}."
@@ -414,9 +518,15 @@ class VaspParser:
                 any of the VASP output files.
         """
         try:
-            return float(self.load_oszicar().ionic_steps[-1]['mag'])
-        except (FileNotFoundError, OszicarError, AttributeError, IndexError, KeyError, TypeError) as e:
-            logging.warning(f"OSZICAR failed to provide net magnetic moment ({type(e).__name__}). Trying OUTCAR.")
+            return self.extract_oszicar_property(
+                step_type="ionic",
+                property_name="magnetization"
+            )
+        except (FileNotFoundError, OszicarError) as e:
+            logging.warning(
+                f"OSZICAR failed to provide net magnetic moment "
+                f"({type(e).__name__} - {e}). Trying OUTCAR."
+            )
 
         try:
             return self.extract_outcar_property(
@@ -424,7 +534,9 @@ class VaspParser:
                 property_name="net magnetic moment"
             )
         except (FileNotFoundError, OutcarError, PropertyNotFoundError) as e:
-            logging.warning(f"OUTCAR failed to provide net magnetic moment ({type(e).__name__}).")
+            logging.warning(
+                f"OUTCAR failed to provide net magnetic moment ({type(e).__name__} - {e})."
+            )
 
         raise VaspExtractionError(
             f"Unable to extract net magnetic moment from any VASP output files in: {self._directory}."
@@ -451,10 +563,11 @@ class VaspParser:
                 any of the VASP output files.
         """
         try:
-            return self.load_vasprun().structures[-1]
-        except (FileNotFoundError, VasprunError, AttributeError, IndexError) as e:
+            return self.extract_vasprun_property("final_structure")
+        except (FileNotFoundError, VasprunError) as e:
             logging.warning(
-                f"vasprun.xml failed to provide geometry ({type(e).__name__}). Trying POSCAR/CONTCAR."
+                f"vasprun.xml failed to provide geometry "
+                f"({type(e).__name__} - {e}). Trying POSCAR/CONTCAR."
             )
             
         try:

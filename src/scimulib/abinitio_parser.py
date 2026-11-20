@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from collections import deque
 from collections.abc import Callable
+from functools import wraps
 
 import numpy as np
 
@@ -45,11 +46,16 @@ class VaspParser:
         """
         # First, check if the required pymatgen classes are available.
         _check_pymatgen_imports()
-        
-        self._directory = Path(directory)
+
+        if isinstance(directory, (str, Path)):
+            self._directory = Path(directory)
+        else:
+            raise NotADirectoryError(
+                f"The specified directory '{directory}' is not a valid string or Path."
+            )
         if not self._directory.is_dir():
             raise NotADirectoryError(
-                f"The specified directory '{self._directory}' does not exist or is invalid."
+                f"The specified directory '{self._directory}' does not exist."
             )
         
         self._vasprun_path: Path = self._directory / "vasprun.xml"
@@ -75,8 +81,9 @@ class VaspParser:
                                  exception_on_bad_xml=True
     ):
         """
-        Loads the vasprun.xml file using Pymatgen's `Vasprun` class and extracts a specific property.
-        Re-parses the file if the requested parameters change.
+        Loads the vasprun.xml file using Pymatgen's `Vasprun` class and extracts a 
+        specific property by accessing it as an attribute or calling it as a method 
+        if it is callable. Re-parses the file if the requested parameters change.
 
         Args:
             property_name (str): Specific attribute to extract from the Vasprun object.
@@ -93,10 +100,12 @@ class VaspParser:
             Any: The requested property extracted from the Vasprun object.
 
         Raises:
-            FileNotFoundError: If the vasprun.xml file does not exist in the specified directory.
+            FileNotFoundError: If the vasprun.xml file does not exist or is invalid.
             VasprunError: If the file cannot be parsed, if the requested property does not exist,
                 or if an unexpected error occurs during extraction.
         """
+        if not isinstance(self._vasprun_path, Path):
+            raise FileNotFoundError("vasprun.xml path is not set correctly.")
         if not self._vasprun_path.is_file():
             raise FileNotFoundError(f"vasprun.xml file not found at {self._vasprun_path}.")
 
@@ -123,12 +132,26 @@ class VaspParser:
                 ) from e
 
         try:
-            return float(getattr(self._vasprun, property_name))
-        except (AttributeError, TypeError) as e:
+            attribute = getattr(self._vasprun, property_name)
+        except Exception as e:
             raise VasprunError(
-                f"Property '{property_name}' could not be extracted from the Vasprun object. "
-                "Attribute may not exist or may not be a valid value."
+                f"Failed to access property '{property_name}' in Vasprun: "
+                f"{type(e).__name__} - {e}"
             ) from e
+
+        if callable(attribute):
+            @wraps(attribute)
+            def wrapped(*args, **kwargs):
+                try:
+                    return attribute(*args, **kwargs)
+                except Exception as e:
+                    raise VasprunError(
+                        f"Failed to access property '{property_name}' in Vasprun: "
+                        f"{type(e).__name__} - {e}"
+                    ) from e
+            attribute = wrapped
+
+        return attribute
 
     def extract_oszicar_property(self, 
                                  step_type, 
@@ -156,11 +179,13 @@ class VaspParser:
             Any: The requested property from the specified step.
 
         Raises:
-            FileNotFoundError: If the OSZICAR file does not exist.
+            FileNotFoundError: If the OSZICAR file does not exist or is invalid.
             OszicarError: If the OSZICAR file cannot be parsed, if the step_type or 
                 property_name are invalid, if the step indices are out of bounds, or 
                 if the mapped key is missing in the Pymatgen step dictionary.
         """
+        if not isinstance(self._oszicar_path, Path):
+            raise FileNotFoundError("OSZICAR path is not set correctly.")
         if not self._oszicar_path.is_file():
             raise FileNotFoundError(f"OSZICAR file not found at {self._oszicar_path}.")
 
@@ -232,8 +257,8 @@ class VaspParser:
             return step_dict[pymatgen_key]
         except KeyError as e:
             raise OszicarError(
-                f"The expected key '{pymatgen_key}' (property '{property_name}') was not "
-                "found in the requested step. File content may be incomplete or corrupted."
+                f"The expected key '{pymatgen_key}' (property: '{property_name}') was not "
+                "found in the requested step."
             ) from e
 
     def extract_outcar_property(
@@ -261,12 +286,14 @@ class VaspParser:
             float: The successfully extracted and parsed property value.
 
         Raises:
-            FileNotFoundError: If the specified OUTCAR file does not exist.
+            FileNotFoundError: If the specified OUTCAR file does not exist or is invalid.
             OutcarError: If a system-related error occurs while attempting to read the file,
                 or if the extraction function fails to parse the line (e.g., ValueError, IndexError).
             PropertyNotFoundError: If the target pattern(s) are not found before reaching the 
                 beginning of the file, or if the file is completely empty.
         """
+        if not isinstance(self._outcar_path, Path):
+            raise FileNotFoundError("OUTCAR path is not set correctly.")
         if not self._outcar_path.is_file():
             raise FileNotFoundError(f"OUTCAR file not found at {self._outcar_path}.")
 
@@ -329,7 +356,7 @@ class VaspParser:
             "File may be empty, incomplete, or the calculation did not reach this step."
         )
 
-    def extract_outcar_structure(self) -> 'Structure':
+    def extract_outcar_structure(self) -> Structure:
         """
         Generalized method to extract the final pymatgen Structure from an OUTCAR file.
 
@@ -347,12 +374,14 @@ class VaspParser:
                 of the calculation.
 
         Raises:
-            FileNotFoundError: If the specified OUTCAR file does not exist.
+            FileNotFoundError: If the specified OUTCAR file does not exist or is invalid.
             OutcarError: If a system-related error occurs during reading, or if 
                 pymatgen fails to instantiate the Structure object.
             StructureNotFoundError: If essential structural patterns (species, lattice, or coords) 
                 are missing, suggesting a corrupted, incomplete, or empty file.
         """
+        if not isinstance(self._outcar_path, Path):
+            raise FileNotFoundError("OUTCAR path is not set correctly.")
         if not self._outcar_path.is_file():
             raise FileNotFoundError(f"OUTCAR file not found at {self._outcar_path}.")
 
@@ -494,7 +523,7 @@ class VaspParser:
                 of the VASP output files.
         """
         try:
-            return self.extract_vasprun_property("final_energy")
+            return float(self.extract_vasprun_property("final_energy"))
         except (FileNotFoundError, VasprunError) as e:
             logging.warning(
                 f"vasprun.xml failed to provide total energy "
@@ -502,9 +531,11 @@ class VaspParser:
             )
 
         try:
-            return self.extract_oszicar_property(
+            return float(
+                self.extract_oszicar_property(
                 step_type="ionic", 
                 property_name="energy_without_entropy"
+                )
             )
         except (FileNotFoundError, OszicarError) as e:
             logging.warning(
@@ -549,9 +580,11 @@ class VaspParser:
                 any of the VASP output files.
         """
         try:
-            return self.extract_oszicar_property(
+            return float(
+                self.extract_oszicar_property(
                 step_type="ionic",
                 property_name="magnetization"
+                )
             )
         except (FileNotFoundError, OszicarError) as e:
             logging.warning(
@@ -640,10 +673,15 @@ class BaderParser:
         Raises:
             NotADirectoryError: If the specified directory does not exist or is invalid.
         """
-        self._directory = Path(directory)
+        if isinstance(directory, (str, Path)):
+            self._directory = Path(directory)
+        else:
+            raise NotADirectoryError(
+                f"The specified directory '{directory}' is not a valid string or Path."
+            )
         if not self._directory.is_dir():
             raise NotADirectoryError(
-                f"The specified directory '{self._directory}' does not exist or is invalid."
+                f"The specified directory '{self._directory}' does not exist."
             )
 
         self._acf_path = self._directory / "ACF.dat"
@@ -670,10 +708,15 @@ class BaderParser:
             np.ndarray: A 1D NumPy array of extracted values for each atom. 
 
         Raises:
-            FileNotFoundError: If the ACF file cannot be found at the specified path.
+            FileNotFoundError: If the ACF file cannot be found at the specified 
+                path or is invalid.
             AcfError: If the file is malformed or data extraction fails.
         """
+        if not isinstance(acf_path, (str, Path)):
+            raise FileNotFoundError(f"ACF file path '{acf_path}' is not a valid string or Path.")
+        
         acf_path = Path(acf_path)
+
         if not acf_path.is_file():
             raise FileNotFoundError(f"ACF file not found at {acf_path}.")
 

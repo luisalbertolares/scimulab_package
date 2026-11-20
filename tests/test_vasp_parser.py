@@ -1,44 +1,46 @@
-import os
-import pytest
+from pathlib import Path
 
 from math import isclose
 import numpy as np
+
+from pymatgen.core import Lattice, Structure
 
 from scimulib.abinitio_parser import VaspParser
 
 
 # Path of the test output files from VASP (Au7Co6 cluster)
-path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'
+TEST_DIRECTORY = Path(__file__).parent
+DATA_DIRECTORY = TEST_DIRECTORY / "test_data"
 
-# Extraction of energy and magnetic moment
-with open (os.path.join(path, 'energy.txt'), 'r') as f:
+vasp_parser = VaspParser(DATA_DIRECTORY)
+
+# Reference energy, magnetic moment and geometry
+with open (DATA_DIRECTORY / 'energy.txt', 'r') as f:
     energy_txt = float(f.read().strip())
 
-with open (os.path.join(path, 'magmom.txt'), 'r') as f:
+with open (DATA_DIRECTORY / 'magmom.txt', 'r') as f:
     magmom_txt = float(f.read().strip())
 
 
-def test_vasp_calculation_vasprun():
-    
-    vasp_calc = VaspParser(path)
 
-    assert isclose(vasp_calc.get_total_energy(), energy_txt, abs_tol=0.0001)
-    assert isclose(vasp_calc.get_structure(), magmom_txt, abs_tol=0.0001)
+
+def test_vasp_parser_energy_vasprun():
+    assert isclose(vasp_parser.get_total_energy(), energy_txt, abs_tol=0.0001)
+
+def test_vasp_parser_magmom_vasprun():
+
+    assert isclose(vasp_parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
+
+def test_vasp_parser_structure_vasprun():
+    assert isclose(vasp_parser.get_structure(), energy_txt, abs_tol=0.0001)
 
 
 def test_vasp_calculation_oszicar():
-
-    with open (os.path.join(path, 'energy.txt'), 'r') as f:
-        energy_txt = float(f.read().strip())
-
-    with open (os.path.join(path, 'magmom.txt'), 'r') as f:
-        magmom_txt = float(f.read().strip())
     
-    vasp_calc = VaspParser(path)
-    vasp_calc._vasprun_path = None
+    vasp_parser._vasprun_path = None
 
-    assert isclose(vasp_calc.get_total_energy(), energy_txt, abs_tol=0.0001)
-    assert isclose(vasp_calc.get_net_magmom(), magmom_txt, abs_tol=0.0001)
+    assert isclose(vasp_parser.get_total_energy(), energy_txt, abs_tol=0.0001)
+    assert isclose(vasp_parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
 
 def test_vasp_calculation_outcar():
     path = '/mnt/g/Unidades compartidas/Screening_AuMTiO2/data/sistemas/AuCo/cumulo/Au7Co6'

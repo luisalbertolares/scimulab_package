@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pymatgen.core import Structure
+from pymatgen.core import Molecule, Structure
 
 from scimulib.abinitio_parser import VaspParser, BaderParser
 from scimulib.exceptions import VaspExtractionError, BaderExtractionError
@@ -20,7 +20,7 @@ class ChemicalEntity:
             self, name: str, 
             total_energy: float | None, 
             net_magmom: float | None, 
-            structure: Structure | None
+            structure: Structure | Molecule | None
     ):
         """
         Initializes a ChemicalEntity instance.
@@ -29,7 +29,7 @@ class ChemicalEntity:
             name (str): The name of the chemical entity.
             total_energy (float | None): The total energy of the chemical entity.
             net_magmom (float | None): The net magnetic moment of the chemical entity.
-            structure (Structure | None): The geometric structure of the chemical entity.
+            structure (Structure | Molecule | None): The geometric structure of the chemical entity.
         """
         self._name = name
         self._total_energy = total_energy
@@ -59,27 +59,47 @@ class ChemicalEntity:
         return self._net_magmom
 
     @property
-    def geometry(self) -> Structure | None:
-        """Returns the geometric structure of the chemical entity."""
-        if self._structure:
-            return Structure(
-                self._structure.lattice,
-                self._structure.species,
-                self._structure.frac_coords
-            )
-        else:
+    def geometry(self) -> Structure | Molecule | None:
+        """
+        Returns a clean geometric structure 
+        (only species, coords, and lattice if applicable).
+        """
+        if self._structure is None:
             return None
 
+        if isinstance(self._structure, Structure):
+            return Structure(
+                self._structure.lattice.copy(),
+                self._structure.species.copy(),
+                self._structure.frac_coords.copy(),
+            )
+
+        if isinstance(self._structure, Molecule):
+            return Molecule(
+                self._structure.species.copy(),
+                self._structure.cart_coords.copy(),
+            )
+        
     @property
     def fractional_coords(self) -> np.ndarray | None:
         """
-        Returns the fractional coordinates of the structure as a 
+        Returns the fractional coordinates of the structure as a
         numpy array, if available.
         """
-        if self._structure:
-            return self._structure.frac_coords
-        else:
+        if self._structure is None:
             return None
+
+        if isinstance(self._structure, Molecule):
+            logging.warning(
+                "Molecule objects' coordinates cannot be "
+                "converted to fractional coordinates."
+            )
+            return None
+
+        if isinstance(self._structure, Structure):
+            return self._structure.frac_coords.copy()
+
+        return None
 
     @property
     def cartesian_coords(self) -> np.ndarray | None:
@@ -88,7 +108,7 @@ class ChemicalEntity:
         numpy array, if available.
         """
         if self._structure:
-            return self._structure.cart_coords
+            return self._structure.cart_coords.copy()
         else:
             return None
     
@@ -105,6 +125,14 @@ class ChemicalEntity:
         """Returns the Bader magnetic moments as a numpy array, if available."""
         if "bader_magmom" in self._structure.site_properties:
             return np.array(self._structure.site_properties["bader_magmom"])
+        else:
+            return None
+
+    @property
+    def composition(self) -> dict[str, float] | None:
+        """Returns the composition of the chemical entity, if available."""
+        if self._structure:
+            return self._structure.composition.get_el_amt_dict()
         else:
             return None
 

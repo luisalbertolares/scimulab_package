@@ -127,7 +127,7 @@ class VaspParser:
             ) from e
         except TypeError as e:
             raise VasprunError(
-                f"Property '{property_name}' is not a scalar value"
+                f"Property '{property_name}' is not a scalar value."
             ) from e
 
     def extract_oszicar_property(self, 

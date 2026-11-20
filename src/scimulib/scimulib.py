@@ -64,9 +64,6 @@ class ChemicalEntity:
         Returns a clean geometric structure 
         (only species, coords, and lattice if applicable).
         """
-        if self._structure is None:
-            return None
-
         if isinstance(self._structure, Structure):
             return Structure(
                 self._structure.lattice.copy(),
@@ -79,6 +76,8 @@ class ChemicalEntity:
                 self._structure.species.copy(),
                 self._structure.cart_coords.copy(),
             )
+
+        return None
         
     @property
     def fractional_coords(self) -> np.ndarray | None:
@@ -86,9 +85,6 @@ class ChemicalEntity:
         Returns the fractional coordinates of the structure as a
         numpy array, if available.
         """
-        if self._structure is None:
-            return None
-
         if isinstance(self._structure, Molecule):
             logging.warning(
                 "Molecule objects' coordinates cannot be "
@@ -96,10 +92,7 @@ class ChemicalEntity:
             )
             return None
 
-        if isinstance(self._structure, Structure):
-            return self._structure.frac_coords.copy()
-
-        return None
+        return self._structure.frac_coords.copy()
 
     @property
     def cartesian_coords(self) -> np.ndarray | None:
@@ -107,18 +100,15 @@ class ChemicalEntity:
         Returns the Cartesian coordinates of the structure as a 
         numpy array, if available.
         """
-        if self._structure:
-            return self._structure.cart_coords.copy()
-        else:
-            return None
+        return self._structure.cart_coords.copy()
     
     @property
     def bader_charges(self) -> np.ndarray | None:
         """Returns the Bader charges as a numpy array, if available."""
         if "bader_charge" in self._structure.site_properties:
             return np.array(self._structure.site_properties["bader_charge"])
-        else:
-            return None
+
+        return None
 
     @property
     def bader_magnetic_moments(self) -> np.ndarray | None:
@@ -131,10 +121,7 @@ class ChemicalEntity:
     @property
     def composition(self) -> dict[str, float] | None:
         """Returns the composition of the chemical entity, if available."""
-        if self._structure:
-            return self._structure.composition.get_el_amt_dict()
-        else:
-            return None
+        return self._structure.composition.get_el_amt_dict()
 
     @classmethod
     def from_vasp(cls, directory: str | Path, name: str = None):

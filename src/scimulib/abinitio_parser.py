@@ -289,8 +289,6 @@ class VaspParser:
             FileNotFoundError: If the specified OUTCAR file does not exist or is invalid.
             OutcarError: If a system-related error occurs while attempting to read the file,
                 or if the extraction function fails to parse the line (e.g., ValueError, IndexError).
-            PropertyNotFoundError: If the target pattern(s) are not found before reaching the 
-                beginning of the file, or if the file is completely empty.
         """
         if not isinstance(self._outcar_path, Path):
             raise FileNotFoundError("OUTCAR path is not set correctly.")
@@ -377,8 +375,6 @@ class VaspParser:
             FileNotFoundError: If the specified OUTCAR file does not exist or is invalid.
             OutcarError: If a system-related error occurs during reading, or if 
                 pymatgen fails to instantiate the Structure object.
-            StructureNotFoundError: If essential structural patterns (species, lattice, or coords) 
-                are missing, suggesting a corrupted, incomplete, or empty file.
         """
         if not isinstance(self._outcar_path, Path):
             raise FileNotFoundError("OUTCAR path is not set correctly.")

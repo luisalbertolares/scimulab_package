@@ -124,13 +124,10 @@ class VaspParser:
 
         try:
             return float(getattr(self._vasprun, property_name))
-        except AttributeError as e:
+        except (AttributeError, TypeError) as e:
             raise VasprunError(
-                f"Attribute '{property_name}' does not exist in Vasprun object."
-            ) from e
-        except TypeError as e:
-            raise VasprunError(
-                f"Property '{property_name}' is not a scalar value."
+                f"Property '{property_name}' could not be extracted from the Vasprun object. "
+                "Attribute may not exist or may not be a valid value."
             ) from e
 
     def extract_oszicar_property(self, 
@@ -235,7 +232,8 @@ class VaspParser:
             return step_dict[pymatgen_key]
         except KeyError as e:
             raise OszicarError(
-                f"The expected key '{pymatgen_key}' was not found in the requested step."
+                f"The expected key '{pymatgen_key}' (property '{property_name}') was not "
+                "found in the requested step. File content may be incomplete or corrupted."
             ) from e
 
     def extract_outcar_property(

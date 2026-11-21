@@ -202,6 +202,15 @@ class ChemicalEntity:
             return None
         return self._structure.composition.get_el_amt_dict()
 
+    @property
+    def atomic_fraction(self) -> dict[str, float] | None:
+        """Returns the atomic fraction of each element in the chemical entity, if available."""
+        comp = self.composition
+        if comp is None:
+            return None
+        total = sum(comp.values())
+        return {el: amt / total for el, amt in comp.items()}
+
     @classmethod
     def from_vasp(cls, directory: str | Path, name: str = None):
         """

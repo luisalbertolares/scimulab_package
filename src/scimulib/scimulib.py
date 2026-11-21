@@ -219,13 +219,6 @@ class ChemicalEntity:
             )
             structure = None
 
-        instance = cls(
-            name=entity_name,
-            total_energy=total_energy,
-            net_magmom=net_magmom,
-            geometry=structure
-        )
-
         bader_parser = BaderParser(
             directory=directory, 
             expected_atoms=len(structure) if structure is not None else None
@@ -233,7 +226,7 @@ class ChemicalEntity:
         try:
             bader_charges = bader_parser.get_charges()
             if structure is not None:
-                instance._structure.add_site_property("bader_charge", bader_charges)
+                structure.add_site_property("bader_charge", bader_charges)
             else:
                 logging.warning(
                     f"{cls.__name__} '{entity_name}': Structure is None, cannot add Bader charges."
@@ -246,7 +239,7 @@ class ChemicalEntity:
         try:
             bader_magmom = bader_parser.get_magnetic_moments()
             if structure is not None:
-                instance._structure.add_site_property("bader_magmom", bader_magmom)
+                structure.add_site_property("bader_magmom", bader_magmom)
             else:
                 logging.warning(
                     f"{cls.__name__} '{entity_name}': Structure is None, cannot add Bader magnetic moments."
@@ -256,4 +249,9 @@ class ChemicalEntity:
                 f"{cls.__name__} '{entity_name}': {e}"
             )
 
-        return instance
+        return cls(
+            name=entity_name,
+            total_energy=total_energy,
+            net_magmom=net_magmom,
+            geometry=structure
+        )

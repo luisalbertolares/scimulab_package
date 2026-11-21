@@ -5,6 +5,7 @@ import numpy as np
 
 from pymatgen.core import Molecule, Structure
 
+from scimulib.import_utils import check_pymatgen_imports
 from scimulib.abinitio_parser import VaspParser, BaderParser
 from scimulib.exceptions import VaspExtractionError, BaderExtractionError
 
@@ -20,7 +21,7 @@ class ChemicalEntity:
             self, name: str, 
             total_energy: float | None, 
             net_magmom: float | None, 
-            structure: Structure | Molecule | None
+            geometry: Structure | Molecule | None
     ):
         """
         Initializes a ChemicalEntity instance.
@@ -29,18 +30,29 @@ class ChemicalEntity:
             name (str): The name of the chemical entity.
             total_energy (float | None): The total energy of the chemical entity.
             net_magmom (float | None): The net magnetic moment of the chemical entity.
-            structure (Structure | Molecule | None): The geometric structure of the chemical entity.
+            geometry (Structure | Molecule | None): The geometric structure of the chemical entity.
+
+        Raises:
+            ValueError: If both total_energy and geometry are None.
         """
-        self._name = name
-        self._total_energy = total_energy
-        self._net_magmom = net_magmom
-        self._structure = structure
+        check_pymatgen_imports()
+
+        self.name = name
+        self.total_energy = total_energy
+        self.net_magmom = net_magmom
+        self.geometry = geometry
+
+        if self.total_energy is None and self.geometry is None:
+            raise ValueError(
+                f"Cannot create a {self.__class__.__name__} instance. "
+                "At least one of total_energy or geometry must be provided."
+            )
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__} (name={self._name}, "
+            f"{self.__class__.__name__} (name={self.name}, "
             f"formula={self._structure.composition.formula if self._structure else 'N/A'}, "
-            f"total_energy={self._total_energy if self._total_energy else 'N/A'}"
+            f"total_energy={self.total_energy if self.total_energy is not None else 'N/A'}"
         )
 
     @property
@@ -48,15 +60,36 @@ class ChemicalEntity:
         """Returns the name of the chemical entity."""
         return self._name
 
+    @name.setter
+    def name(self, value: str):
+        """Sets the name of the chemical entity."""
+        if not isinstance(value, str) or not value.strip():
+            raise TypeError("Name must be a non-empty string.")
+        self._name = value
+
     @property
     def total_energy(self) -> float | None:
         """Returns the total energy of the chemical entity."""
         return self._total_energy
 
+    @total_energy.setter
+    def total_energy(self, value: float | None):
+        """Sets the total energy of the chemical entity."""
+        if value is not None and not isinstance(value, (float, int)):
+            raise TypeError("Total energy must be a float or None.")
+        self._total_energy = value
+
     @property
     def net_magmom(self) -> float | None:
         """Returns the net magnetic moment of the chemical entity."""
         return self._net_magmom
+
+    @net_magmom.setter
+    def net_magmom(self, value: float | None):
+        """Sets the net magnetic moment of the chemical entity."""
+        if value is not None and not isinstance(value, (float, int)):
+            raise TypeError("Net magnetic moment must be a float or None.")
+        self._net_magmom = value
 
     @property
     def geometry(self) -> Structure | Molecule | None:
@@ -78,7 +111,14 @@ class ChemicalEntity:
             )
 
         return None
-        
+
+    @geometry.setter
+    def geometry(self, object: Structure | Molecule | None):
+        """Sets the geometric structure of the chemical entity."""
+        if object is not None and not isinstance(object, (Structure, Molecule)):
+            raise TypeError("Geometry must be a Structure, Molecule, or None.")
+        self._structure = object
+
     @property
     def fractional_coords(self) -> np.ndarray | None:
         """
@@ -164,20 +204,6 @@ class ChemicalEntity:
             total_energy = None
 
         try:
-            structure = vasp_parser.get_structure()
-        except VaspExtractionError as e:
-            logging.warning(
-                f"{cls.__name__} '{entity_name}': {e}"
-            )
-            structure = None
-
-        if total_energy is None and structure is None:
-            raise ValueError(
-                f"Cannot initialize {cls.__name__} for {entity_name}: "
-                "Without total energy and structure, initialization is impossible."
-            )
-
-        try:
             net_magmom = vasp_parser.get_net_magmom()
         except VaspExtractionError as e:
             logging.warning(
@@ -185,11 +211,19 @@ class ChemicalEntity:
             )
             net_magmom = None
 
+        try:
+            structure = vasp_parser.get_structure()
+        except VaspExtractionError as e:
+            logging.warning(
+                f"{cls.__name__} '{entity_name}': {e}"
+            )
+            structure = None
+
         instance = cls(
             name=entity_name,
             total_energy=total_energy,
             net_magmom=net_magmom,
-            structure=structure
+            geometry=structure
         )
 
         bader_parser = BaderParser(
@@ -197,7 +231,7 @@ class ChemicalEntity:
             expected_atoms=len(structure) if structure is not None else None
         )
         try:
-            bader_charges = bader_parser.get_bader_charges()
+            bader_charges = bader_parser.get_charges()
             if structure is not None:
                 instance._structure.add_site_property("bader_charge", bader_charges)
             else:
@@ -210,7 +244,7 @@ class ChemicalEntity:
             )
 
         try:
-            bader_magmom = bader_parser.get_bader_magnetic_moments()
+            bader_magmom = bader_parser.get_magnetic_moments()
             if structure is not None:
                 instance._structure.add_site_property("bader_magmom", bader_magmom)
             else:

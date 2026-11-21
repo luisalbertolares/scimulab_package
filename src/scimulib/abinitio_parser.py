@@ -10,22 +10,10 @@ import numpy as np
 from pymatgen.io.vasp.outputs import Vasprun, Oszicar
 from pymatgen.core import Structure, Lattice
 
+from scimulib.import_utils import check_pymatgen_imports
 from scimulib.exceptions import VaspExtractionError, VasprunError, OszicarError, OutcarError, \
     BaderExtractionError, AcfError
 
-
-def _check_pymatgen_imports():
-    """
-    Checks if the required pymatgen classes are available. Raises ImportError if not.
-    """
-    try:
-        from pymatgen.io.vasp.outputs import Vasprun, Oszicar
-        from pymatgen.core import Structure, Lattice
-    except ImportError as e:
-        raise ImportError(
-            "The 'pymatgen' library is required for VASP parsing. "
-            "Please install it via 'pip install pymatgen'."
-        ) from e
 
 class VaspParser:
     """
@@ -45,7 +33,7 @@ class VaspParser:
             NotADirectoryError: If the specified directory does not exist or is invalid.
         """
         # First, check if the required pymatgen classes are available.
-        _check_pymatgen_imports()
+        check_pymatgen_imports()
 
         if isinstance(directory, (str, Path)):
             self._directory = Path(directory)
@@ -68,6 +56,9 @@ class VaspParser:
         self._vasprun: Vasprun | None = None
         self._vasprun_params: dict = {}
         self._oszicar: Oszicar | None = None
+
+    def __repr__(self):
+        return f"VASP outputs directory: {self._directory}"
 
     def extract_vasprun_property(self, 
                                  property_name, 
@@ -685,6 +676,9 @@ class BaderParser:
         self._acf_mag_path = self._directory / "ACF_mag.dat"
 
         self._expected_atoms = expected_atoms
+
+    def __repr__(self):
+        return f"Bader analysis directory: {self._directory}"
 
     @staticmethod
     def parse_acf_file(acf_path: str | Path, 

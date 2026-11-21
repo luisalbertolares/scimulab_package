@@ -42,10 +42,10 @@ class ChemicalEntity:
         self.net_magmom = net_magmom
         self.geometry = geometry
 
-        if self.total_energy is None and self.geometry is None:
+        if self.total_energy is None and self.geometry is None and self.net_magmom is None:
             raise ValueError(
                 f"Cannot create a {self.__class__.__name__} instance. "
-                "At least one of total_energy or geometry must be provided."
+                "At least one property must be provided."
             )
 
     def __repr__(self):
@@ -96,7 +96,7 @@ class ChemicalEntity:
         """
         Returns a clean geometric structure 
         (only species, coords, and lattice if applicable).
-        """
+        """           
         if isinstance(self._structure, Structure):
             return Structure(
                 self._structure.lattice.copy(),
@@ -125,6 +125,14 @@ class ChemicalEntity:
         Returns the fractional coordinates of the structure as a
         numpy array, if available.
         """
+        if self._structure is None:
+            logging.warning(
+                "Fractional coordinates are not available since the structure is not "
+                f"set. Create a new {self.__class__.__name__} with a structure to "
+                "access to the attribute."
+            )
+            return None
+        
         if isinstance(self._structure, Molecule):
             logging.warning(
                 "Molecule objects' coordinates cannot be "
@@ -140,27 +148,58 @@ class ChemicalEntity:
         Returns the Cartesian coordinates of the structure as a 
         numpy array, if available.
         """
+        if self._structure is None:
+            logging.warning(
+                "Cartesian coordinates are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+
         return self._structure.cart_coords.copy()
     
     @property
     def bader_charges(self) -> np.ndarray | None:
         """Returns the Bader charges as a numpy array, if available."""
+        if self._structure is None:
+            logging.warning(
+                "Bader charges are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
         if "bader_charge" in self._structure.site_properties:
             return np.array(self._structure.site_properties["bader_charge"])
-
+        
+        logging.warning("Bader charges are not available.")
         return None
 
     @property
     def bader_magnetic_moments(self) -> np.ndarray | None:
         """Returns the Bader magnetic moments as a numpy array, if available."""
+        if self._structure is None:
+            logging.warning(
+                "Bader magnetic moments are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
         if "bader_magmom" in self._structure.site_properties:
             return np.array(self._structure.site_properties["bader_magmom"])
-        else:
-            return None
+        
+        logging.warning("Bader magnetic moments are not available.")
+        return None
 
     @property
     def composition(self) -> dict[str, float] | None:
         """Returns the composition of the chemical entity, if available."""
+        if self._structure is None:
+            logging.warning(
+                "Composition is not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
         return self._structure.composition.get_el_amt_dict()
 
     @classmethod

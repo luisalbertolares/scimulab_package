@@ -841,7 +841,11 @@ class VaspParser:
                 f"Failed to extract valence electrons from POTCAR "
                 f"({type(e).__name__} - {e})."
             )
-            return {}
+
+        raise VaspExtractionError(
+            f"Unable to extract valence electrons from any VASP "
+            f"output files in: {self._directory}."
+        )
 
 class BaderParser:
     """

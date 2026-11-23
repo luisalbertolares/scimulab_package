@@ -823,7 +823,21 @@ class VaspParser:
             f"Unable to extract geometry from any VASP output files in: {self._directory}."
         )
 
-    def get_valence_electrons(self) -> dict[str, int] | None:
+    def get_valence_electrons(self) -> dict[str, int]:
+        """
+        Extracts the valence electrons for each atom from the VASP output files.
+
+        First, it attempts to extract the valence electrons from the OUTCAR file.
+        If that fails, it tries to extract them from the POTCAR file.
+
+        Returns:
+            dict[str, int]: A dictionary mapping element symbols to their valence 
+                electron counts.
+
+        Raises:
+            VaspExtractionError: If valence electrons cannot be extracted from 
+                any VASP output files.
+        """
         try:
             valence_electrons = self.extract_outcar_valence_electrons()
             return valence_electrons

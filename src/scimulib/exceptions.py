@@ -1,3 +1,19 @@
+# Custom exceptions for ChemicalEntity class in scimulib.
+class MissingGeometryError(ValueError):
+    """Raised when a geometric property is accessed without an assigned geometry."""
+    pass
+
+
+class NonPeriodicGeometryError(TypeError):
+    """Raised when a periodic property is accessed on a non-periodic Molecule."""
+    pass
+
+
+class MissingSitePropertyError(ValueError):
+    """Raised when a required site property is not present in the structure."""
+    pass
+
+
 # The following classes define custom exceptions for handling errors related to VASP output file extraction.
 class VaspExtractionError(Exception):
     """
@@ -76,6 +92,7 @@ class StoichiometryError(EnergyCalculationError):
     pass
 
 
+# Custom exceptions for Bader calculations
 class BaderCalculationError(Exception):
     """Base exception for errors raised during Bader net charge calculations."""
     pass

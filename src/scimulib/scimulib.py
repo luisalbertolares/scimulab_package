@@ -8,7 +8,8 @@ from pymatgen.core import Molecule, Structure
 from scimulib.import_utils import check_pymatgen_imports
 from scimulib.exceptions import (
     VaspExtractionError, BaderExtractionError, SizeMismatchError, InvalidValenceValueError, 
-    MissingValenceElementError, ChargeNeutralityError, MagneticMomentMismatchError
+    MissingValenceElementError, ChargeNeutralityError, MagneticMomentMismatchError,
+    MissingGeometryError, NonPeriodicGeometryError, MissingSitePropertyError
 )
 from scimulib.abinitio_parser import VaspParser, BaderParser
 from scimulib.bader_calc import (
@@ -23,19 +24,13 @@ class ChemicalEntity:
     site properties extracted from the calculation.
     """
 
-    # Dictionary mapping elements to their default valence electron counts 
-    # as it appears in the VASP POTCAR files.
-    valence_electrons = {
-        "Au": 11, "Fe": 8, "Os": 8, "Ru": 14, "Ti": 12, "O":  6,
-        "Co": 9,  "Rh": 15, "Ir": 9, "Ni": 10, "Pd": 10, "Pt": 10,
-        "Cu": 11, "Ag": 11, "Al": 3
-    }
-
     def __init__(
-            self, name: str, 
+            self, 
+            name: str, 
             total_energy: float | None, 
             net_magmom: float | None, 
-            geometry: Structure | Molecule | None
+            geometry: Structure | Molecule | None,
+            valence_electrons: dict[str, float] = {}
     ):
         """
         Initializes a ChemicalEntity instance.
@@ -45,6 +40,8 @@ class ChemicalEntity:
             total_energy (float | None): The total energy of the chemical entity.
             net_magmom (float | None): The net magnetic moment of the chemical entity.
             geometry (Structure | Molecule | None): The geometric structure of the chemical entity.
+            valence_electrons (dict[str, float], optional): The valence electrons of each element in the 
+                chemical entity. Defaults to an empty dictionary.
 
         Raises:
             ValueError: If both total_energy and geometry are None.
@@ -56,7 +53,11 @@ class ChemicalEntity:
         self.net_magmom = net_magmom
         self.geometry = geometry
 
-        if self.total_energy is None and self.geometry is None and self.net_magmom is None:
+        if (
+            self.total_energy is None 
+            and self.geometry is None 
+            and self.net_magmom is None
+        ):
             raise ValueError(
                 f"Cannot create a {self.__class__.__name__} instance. "
                 "At least one property must be provided."
@@ -69,6 +70,7 @@ class ChemicalEntity:
             f"total_energy={self.total_energy if self.total_energy is not None else 'N/A'}"
         )
 
+    # In this part, we define property getters and setters for the chemical entity's attributes.
     @property
     def name(self) -> str:
         """Returns the name of the chemical entity."""
@@ -134,82 +136,88 @@ class ChemicalEntity:
         self._structure = object
 
     @property
-    def fractional_coords(self) -> np.ndarray | None:
+    def valence_electrons(self) -> dict[str, float] | None:
+        """
+        Returns the valence electrons of each element in the chemical entity, 
+        if available.
+        """
+        return self._valence_electrons.copy() if self._valence_electrons else None
+
+    @valence_electrons.setter
+    def valence_electrons(self, value: dict[str, float] | None):
+        """Sets the valence electrons of each element in the chemical entity."""
+        if value is not None and not isinstance(value, dict):
+            raise TypeError("Valence electrons must be a dictionary or None.")
+        self._valence_electrons = value if value is not None else {}
+
+    # Here we define property getters for geometric and compositional attributes 
+    # (i.e. completely derived from the underlying geometry).
+    @property
+    def _require_geometry(self) -> Structure | Molecule:
+        """Returns the underlying geometry or raises MissingGeometryError."""
+        if self._structure is None:
+            raise MissingGeometryError(
+                f"Cannot access to geometric properties and methods: no geometry is set on "
+                f"this {self.__class__.__name__} instance."
+            )
+        return self._structure
+
+    @property
+    def _require_periodic(self) -> Structure:
+        """Returns the underlying periodic geometry or raises NonPeriodicGeometryError."""
+        geometry = self._require_geometry
+        if not isinstance(geometry, Structure):
+            raise NonPeriodicGeometryError(
+                f"Periodic property or method is not available: {self.__class__.__name__} "
+                f"holds a non-periodic '{type(geometry).__name__}' object."
+            )
+        return geometry
+    
+    @property
+    def fractional_coords(self) -> np.ndarray:
         """
         Returns the fractional coordinates of the structure as a
         numpy array, if available.
         """
-        if self._structure is None:
-            logging.warning(
-                "Fractional coordinates are not available since the structure is not "
-                f"set. Create a new {self.__class__.__name__} with a structure to "
-                "access to the attribute."
-            )
-            return None
-        
-        if isinstance(self._structure, Molecule):
-            logging.warning(
-                "Molecule objects' coordinates cannot be "
-                "converted to fractional coordinates."
-            )
-            return None
-
-        return self._structure.frac_coords.copy()
+        return self._require_periodic.frac_coords.copy()
 
     @property
-    def cartesian_coords(self) -> np.ndarray | None:
+    def cartesian_coords(self) -> np.ndarray:
         """
         Returns the Cartesian coordinates of the structure as a 
         numpy array, if available.
         """
-        if self._structure is None:
-            logging.warning(
-                "Cartesian coordinates are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-
-        return self._structure.cart_coords.copy()
+        return self._require_geometry.cart_coords.copy()
 
     @property
-    def composition(self) -> dict[str, float] | None:
+    def composition(self) -> dict[str, float]:
         """Returns the composition of the chemical entity, if available."""
-        if self._structure is None:
-            logging.warning(
-                "Composition is not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-        return self._structure.composition.get_el_amt_dict()
+        return self._require_geometry.composition.get_el_amt_dict()
 
     @property
-    def atomic_fraction(self) -> dict[str, float] | None:
+    def atomic_fraction(self) -> dict[str, float]:
         """Returns the atomic fraction of each element in the chemical entity, if available."""
         comp = self.composition
-        if comp is None:
-            return None
         total = sum(comp.values())
         return {el: amt / total for el, amt in comp.items()}
     
-    @property
-    def bader_charges(self) -> np.ndarray | None:
-        """Returns the Bader charges as a numpy array, if available."""
-        if self._structure is None:
-            logging.warning(
-                "Bader charges are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
+    # Here we define property getters for Bader analysis attributes.
+    def _require_site_property(self, property_name: str) -> np.ndarray:
+        geometry = self._require_geometry
+        if property_name not in geometry.site_properties:
+            raise MissingSitePropertyError(
+                f"Site property '{property_name}' is not available on this "
+                f"{self.__class__.__name__} instance."
             )
-            return None
-        if "bader_charge" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_charge"])
-        
-        logging.warning("Bader charges are not available.")
-        return None
+        return np.array(geometry.site_properties[property_name], dtype=float)
 
-    def bader_net_charges(self, valence_electrons: dict[str, int] = None) -> float | None:
+    @property
+    def bader_charges(self) -> np.ndarray:
+        """Returns the Bader charges as a numpy array, if available."""
+        return self._require_site_property("bader_charge")
+
+    @property
+    def bader_net_charges(self) -> np.ndarray:
         """
         Calculates the net Bader charges based on the provided valence electron counts.
 
@@ -223,33 +231,15 @@ class ChemicalEntity:
             None: If the calculation cannot be performed.
         """
         if "bader_net_charges" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_net_charges"])
+            return np.array(self._structure.site_properties["bader_net_charges"], dtype=float)
 
-        if self._structure is None:
-            logging.warning(
-                "Net Bader charges are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-
-        bader_charges = self.bader_charges
-        if bader_charges is None:
-            logging.warning(
-                "Net Bader charges are not available since Bader charges are not set."
-            )
-            return None
-        
-        if valence_electrons is not None:
-            val_electrons = self.valence_electrons | valence_electrons
-        else:
-            val_electrons = self.valence_electrons
-
+        bader_charges = self._require_site_property("bader_charge")
+        valence_electrons = self.valence_electrons
         try:
-            bader_net_charges = calculate_bader_net_charges(
+            return calculate_bader_net_charges(
                 geometry=self._structure,
                 bader_charges=bader_charges,
-                valence_electrons=val_electrons
+                valence_electrons=valence_electrons
             )
         except (
             SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
@@ -257,10 +247,6 @@ class ChemicalEntity:
         ) as e:
             logging.warning(f"Failed to calculate net Bader charges: {e}")
             return None
-
-        self._structure.add_site_property("bader_net_charges", bader_net_charges)
-        return bader_net_charges
-
 
     def sum_bader_charges(self, valence_electrons: dict[str, int] = None) -> dict[str, float] | None:
         """
@@ -407,6 +393,14 @@ class ChemicalEntity:
             )
             structure = None
 
+        try:
+            valence_electrons = vasp_parser.get_valence_electrons()
+        except VaspExtractionError as e:
+            logging.warning(
+                f"{cls.__name__} '{entity_name}': {e}"
+            )
+            valence_electrons = {}
+
         bader_parser = BaderParser(
             directory=directory, 
             expected_atoms=len(structure) if structure is not None else None
@@ -441,5 +435,6 @@ class ChemicalEntity:
             name=entity_name,
             total_energy=total_energy,
             net_magmom=net_magmom,
-            geometry=structure
+            geometry=structure,
+            valence_electrons=valence_electrons
         )

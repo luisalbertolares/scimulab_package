@@ -9,54 +9,54 @@ from scimulib.exceptions import (
 
 
 def calculate_bader_net_charges(
-    geometry: Structure | Molecule, 
+    species_list: np.ndarray | list[str] | tuple[str], 
     bader_charges: np.ndarray | list[float] | tuple[float], 
     valence_electrons: dict[str, float]
 ) -> np.ndarray:
-    """Calculate the net Bader charge for each atom in a pymatgen Structure or Molecule.
+    """Calculate the net Bader charge for each atom given its species and Bader charge from ACF.dat.
 
     The net charge is computed as `valence_electrons - bader_charges`, following
     the standard chemical convention where positive values indicate electron
     depletion (cations) and negative values indicate electron accumulation (anions).
 
     Args:
-        geometry (Structure | Molecule): The atomic geometry whose site ordering 
-            matches `bader_charges`.
+        species_list (array_like): A 1D array-like sequence of element symbols (e.g., 'Ti', 'O')
+            whose ordering matches `bader_charges` from ACF.dat.
         bader_charges (array_like): A 1D array-like sequence of Bader electron
             counts (e.g., from ACF.dat), with the same length and atomic
-            ordering as `geometry`.
+            ordering as `species_list`.
         valence_electrons (dict): Mapping of element symbols (e.g., 'Ti', 'O')
             to their number of valence electrons as floats (e.g., ZVAL values
             from the pseudopotential).
 
     Returns:
         numpy.ndarray: A 1D float array containing the net Bader charge for each
-        atom in `geometry`.
+        atom in `species_list`.
 
     Raises:
-        TypeError: If `geometry` is not a pymatgen `Structure` or `Molecule`.
+        TypeError: If `species_list` is not a 1D array-like sequence of element symbols.
         ValueError: If `bader_charges` is not a 1D array or contains 
             non-finite values.
-        SizeMismatchError: If the number of sites in `geometry` does not
-            match the length of `bader_charges`.
+        SizeMismatchError: If the length of `species_list` does not match the length of `bader_charges`.
         InvalidValenceValueError: If any value in `valence_electrons` is not a
             finite float (e.g., NaN, inf, or a non-float type).
-        MissingValenceElementError: If any element present in `geometry` is
+        MissingValenceElementError: If any element present in `species_list` is
             missing from `valence_electrons`.
     """
-    if not isinstance(geometry, (Structure, Molecule)):
-        raise TypeError("geometry must be a pymatgen Structure or Molecule object.")
+    species_list = np.asarray(species_list, dtype=str)
+    if species_list.ndim != 1:
+        raise ValueError(f"The sequence of species in the geometry must be a 1D array, got {species_list.ndim}D.")
 
     bader_charges = np.asarray(bader_charges, dtype=float)
     if bader_charges.ndim != 1:
-        raise ValueError(f"bader_charges must be a 1D array, got {bader_charges.ndim}D.")
+        raise ValueError(f"The array of Bader charges must be a 1D array, got {bader_charges.ndim}D.")
 
     if not np.all(np.isfinite(bader_charges)):
-        raise ValueError("bader_charges contains non-finite values (NaN or inf).")
+        raise ValueError("The array of Bader charges contains non-finite values (NaN or inf).")
 
-    if len(geometry) != len(bader_charges):
+    if len(species_list) != len(bader_charges):
         raise SizeMismatchError(
-            f"Size mismatch: geometry has {len(geometry)} atoms, "
+            f"Size mismatch: species_list has {len(species_list)} atoms, "
             f"but bader_charges has {len(bader_charges)} elements."
         )
 
@@ -66,86 +66,97 @@ def calculate_bader_net_charges(
                 f"Valence value for '{element}' ({value!r}) is not a valid finite float."
             )
 
-    geometry_symbols = [site.specie.symbol for site in geometry]
-    missing_elements = set(geometry_symbols) - set(valence_electrons.keys())
+    missing_elements = set(species_list) - set(valence_electrons.keys())
 
     if missing_elements:
         raise MissingValenceElementError(
-            f"The following geometry elements are missing from valence_electrons: "
+            f"The following species are missing from the valence electron dictionary: "
             f"{sorted(missing_elements)}"
         )
 
-    valence_array = np.array([valence_electrons[el] for el in geometry_symbols], dtype=float)
+    valence_array = np.array([valence_electrons[el] for el in species_list], dtype=float)
 
     return valence_array - bader_charges
 
 
 def _sum_bader_property_by_species(
-    geometry: Structure | Molecule, 
-    bader_property: np.ndarray | list[float] | tuple[float]
+    species_list: np.ndarray | list[str] | tuple[str], 
+    bader_property: np.ndarray | list[float] | tuple[float],
+    bader_property_name: str = "Bader property",
+    type: np.ndarray | list[str] | tuple[str] | None = None
 ) -> dict[str, float] | dict[str, dict[str, float]]:
     """Sum a Bader atomic property for each species present in a Pymatgen geometry.
 
-    If `geometry` contains a 'component' site property (e.g., 'solid' and
-    'adsorbate_CO'), the sums are grouped into a nested dictionary by component
+    If the geometry contains a 'type' site property (e.g., 'solid' and
+    'adsorbate_CO'), the sums are grouped into a nested dictionary by type
     and then by species symbol. Otherwise, a flat dictionary mapping each
     species symbol to its summed property is returned.
 
     Args:
-        geometry (Structure | Molecule): The atomic geometry whose site ordering 
-            matches `bader_property`.
+        species_list (array_like): A 1D array-like sequence of species symbols
+            whose ordering matches `bader_property`.
         bader_property (array_like): A 1D array-like sequence of Bader values
             (e.g., net charges or magnetic moments) with the same length and
-            atomic ordering as `geometry`.
+            atomic ordering as `species_list`.
+        bader_property_name (str, optional): The name of the Bader property 
+            being summed. Defaults to "Bader property".
+        type (array_like, optional): A 1D array-like sequence of type
+            labels (e.g., 'solid' or 'adsorbate_CO') with the same length and
+            atomic ordering as `species_list`. Defaults to None.
 
     Returns:
-        dict: If 'component' is not in `geometry.site_properties`, a dictionary
-        of the form `{species_symbol: float_sum}`. If 'component' is present,
-        a nested dictionary of the form `{component_name: {species_symbol: float_sum}}`.
+        dict: A dictionary of the form `{species_symbol: float_sum}`.
+        If `type` information is provided separately, a nested dictionary
+        of the form `{type_name: {species_symbol: float_sum}}`.
 
     Raises:
-        TypeError: If `geometry` is not a pymatgen `Structure` or `Molecule`.
+        TypeError: If `species_list` is not an array-like sequence of species symbols.
         ValueError: If `bader_property` is not a 1D array or contains non-finite
             values.
-        SizeMismatchError: If the number of sites in `geometry` does not
-            match the length of `bader_property`.
+        SizeMismatchError: If the length of `species_list` does not
+            match the length of `bader_property` and `type` if provided.
     """
-    if not isinstance(geometry, (Structure, Molecule)):
-        raise TypeError("geometry must be a pymatgen Structure or Molecule object.")
+    species_list = np.asarray(species_list, dtype=str)
+    if species_list.ndim != 1:
+        raise ValueError(f"The sequence of species in the geometry must be a 1D array, got {species_list.ndim}D.")
 
     bader_property = np.asarray(bader_property, dtype=float)
     if bader_property.ndim != 1:
-        raise ValueError(f"bader_property must be a 1D array, got {bader_property.ndim}D.")
+        raise ValueError(f"The {bader_property_name} array must be a 1D array, got {bader_property.ndim}D.")
 
     if not np.all(np.isfinite(bader_property)):
-        raise ValueError("bader_property contains non-finite values (NaN or inf).")
+        raise ValueError(f"The {bader_property_name} array contains non-finite values (NaN or inf).")
 
-    if len(geometry) != len(bader_property):
+    if len(species_list) != len(bader_property):
         raise SizeMismatchError(
-            f"Size mismatch: geometry has {len(geometry)} atoms, "
-            f"but bader_property has {len(bader_property)} elements."
+            f"Size mismatch: The number of atoms in the geometry is {len(species_list)}, "
+            f"but {bader_property_name} has {len(bader_property)} elements."
         )
 
-    has_component = "component" in geometry.site_properties
     result = {}
 
-    if has_component:
-        for site, value in zip(geometry, bader_property):
-            component = site.properties["component"]
-            symbol = site.specie.symbol
-            if component not in result:
-                result[component] = {}
-            result[component][symbol] = float(result[component].get(symbol, 0.0) + value)
+    if type is not None:
+        type = np.asarray(type, dtype=str)
+        if type.ndim != 1:
+            raise ValueError(f"The type array must be a 1D array, got {type.ndim}D.")
+        if len(type) != len(species_list):
+            raise SizeMismatchError(
+                f"Size mismatch: the type array has {len(type)} elements, "
+                f"but the number of atoms in the geometry is {len(species_list)}."
+            )
+        for t, species, value in zip(type, species_list, bader_property):
+            if t not in result:
+                result[t] = {}
+            result[t][species] = float(result[t].get(species, 0.0) + value)
     else:
-        for site, value in zip(geometry, bader_property):
-            symbol = site.specie.symbol
-            result[symbol] = float(result.get(symbol, 0.0) + value)
+        for species, value in zip(species_list, bader_property):
+            result[species] = float(result.get(species, 0.0) + value)
 
     return result
 
 
 def sum_bader_net_charges(
-    geometry: Structure | Molecule, 
+    species_list: np.ndarray | list[str] | tuple[str], 
     net_bader_charges: np.ndarray | list[float] | tuple[float], 
     atol: float = 1e-3
 ):
@@ -155,7 +166,7 @@ def sum_bader_net_charges(
     of the system is zero within the specified absolute tolerance.
 
     Args:
-        geometry (Structure | Molecule): The atomic geometry whose site ordering 
+        species_list (array_like): A 1D array-like sequence of atomic species whose ordering 
             matches `net_bader_charges`.
         net_bader_charges (array_like): A 1D array-like sequence of net Bader
             charges for each atom in `geometry`.
@@ -167,14 +178,14 @@ def sum_bader_net_charges(
         species if 'component' is present in `geometry.site_properties`).
 
     Raises:
-        TypeError: If `geometry` is not a pymatgen `Structure` or `Molecule`.
+        TypeError: If `species_list` is not a valid array-like sequence.
         ValueError: If `net_bader_charges` is not a valid 1D finite array.
-        SizeMismatchError: If `geometry` and `net_bader_charges` differ in
+        SizeMismatchError: If `species_list` and `net_bader_charges` differ in
             length.
         ChargeNeutralityError: If the sum of `net_bader_charges` deviates from
             zero by more than `atol`.
     """
-    charges_by_species = _sum_bader_property_by_species(geometry, net_bader_charges)
+    charges_by_species = _sum_bader_property_by_species(species_list, net_bader_charges, bader_property_name="net Bader charges")
     total_charge = float(np.sum(net_bader_charges))
 
     if not np.isclose(total_charge, 0.0, atol=atol):
@@ -187,7 +198,7 @@ def sum_bader_net_charges(
 
 
 def sum_bader_magnetic_moments(
-    geometry: Structure | Molecule, 
+    species_list: np.ndarray | list[str] | tuple[str], 
     bader_magnetic_moments: np.ndarray | list[float] | tuple[float], 
     total_magnetic_moment: float, 
     atol: float = 1e-3
@@ -199,7 +210,7 @@ def sum_bader_magnetic_moments(
     absolute tolerance.
 
     Args:
-        geometry (Structure | Molecule): The atomic geometry whose site ordering 
+        species_list (array_like): A 1D array-like sequence of atomic species whose ordering 
             matches `bader_magnetic_moments`.
         bader_magnetic_moments (array_like): A 1D array-like sequence of Bader
             magnetic moments for each atom in `geometry`.
@@ -216,7 +227,7 @@ def sum_bader_magnetic_moments(
         TypeError: If `geometry` is not a pymatgen `Structure` or `Molecule`, or
             if `total_magnetic_moment` is not a finite number.
         ValueError: If `bader_magnetic_moments` is not a valid 1D finite array.
-        SizeMismatchError: If `geometry` and `bader_magnetic_moments`
+        SizeMismatchError: If `species_list` and `bader_magnetic_moments`
             differ in length.
         MagneticMomentMismatchError: If the sum of `bader_magnetic_moments`
             deviates from `total_magnetic_moment` by more than `atol`.
@@ -230,7 +241,7 @@ def sum_bader_magnetic_moments(
             f"total_magnetic_moment ({total_magnetic_moment!r}) must be a finite number."
         )
 
-    magmoms_by_species = _sum_bader_property_by_species(geometry, bader_magnetic_moments)
+    magmoms_by_species = _sum_bader_property_by_species(species_list, bader_magnetic_moments, bader_property_name="Bader magnetic moments")
     calculated_total = float(np.sum(bader_magnetic_moments))
 
     if not np.isclose(calculated_total, total_magnetic_moment, atol=atol):

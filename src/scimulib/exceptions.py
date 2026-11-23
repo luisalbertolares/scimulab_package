@@ -1,3 +1,4 @@
+# The following classes define custom exceptions for handling errors related to VASP output file extraction.
 class VaspExtractionError(Exception):
     """
     Base exception for all errors related to the extraction of data from VASP 
@@ -33,6 +34,7 @@ class OutcarError(VaspExtractionError):
     pass
 
 
+# The following classes define custom exceptions for handling errors related to Bader analysis output files.
 class BaderExtractionError(Exception):
     """
     Base exception for all errors related to the extraction of data from Bader analysis output files.
@@ -44,4 +46,53 @@ class AcfError(BaderExtractionError):
     """
     Exception raised for errors occurring during the parsing or extraction of data from Bader ACF files.
     """
+    pass
+
+
+# The following classes define custom exceptions for handling errors related to energy calculations.
+class EnergyCalculationError(Exception):
+    """Base exception for errors occurring during thermodynamic or energy calculations."""
+    pass
+
+
+class MissingReferenceError(EnergyCalculationError):
+    """Raised when one or more required reference energies are missing."""
+
+    def __init__(self, message: str, missing_species: set[str] | list[str] | None = None) -> None:
+        super().__init__(message)
+        self.missing_species = sorted(missing_species) if missing_species is not None else []
+
+
+class StoichiometryError(EnergyCalculationError):
+    """Raised when atomic fractions, counts, or stoichiometric coefficients are invalid."""
+    pass
+
+
+class BaderCalculationError(Exception):
+    """Base exception for errors raised during Bader net charge calculations."""
+    pass
+
+
+class SizeMismatchError(BaderCalculationError):
+    """Raised when the geometry and the Bader charges array have different lengths."""
+    pass
+
+
+class MissingValenceElementError(BaderCalculationError):
+    """Raised when one or more elements in the geometry are missing from the valence dictionary."""
+    pass
+
+
+class InvalidValenceValueError(BaderCalculationError):
+    """Raised when a valence dictionary value is not a valid finite real number."""
+    pass
+
+
+class ChargeNeutralityError(BaderCalculationError):
+    """Raised when the sum of net Bader charges deviates from zero beyond tolerance."""
+    pass
+
+
+class MagneticMomentMismatchError(BaderCalculationError):
+    """Raised when the sum of Bader magnetic moments deviates from the total magnetic moment."""
     pass

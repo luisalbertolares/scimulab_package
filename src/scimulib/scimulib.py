@@ -6,8 +6,14 @@ import numpy as np
 from pymatgen.core import Molecule, Structure
 
 from scimulib.import_utils import check_pymatgen_imports
+from scimulib.exceptions import (
+    VaspExtractionError, BaderExtractionError, SizeMismatchError, InvalidValenceValueError, 
+    MissingValenceElementError, ChargeNeutralityError, MagneticMomentMismatchError
+)
 from scimulib.abinitio_parser import VaspParser, BaderParser
-from scimulib.exceptions import VaspExtractionError, BaderExtractionError
+from scimulib.bader_calc import (
+    calculate_bader_net_charges, sum_bader_net_charges, sum_bader_magnetic_moments
+)
 
 
 class ChemicalEntity:
@@ -16,6 +22,14 @@ class ChemicalEntity:
     net magnetic moment, and geometric structure. It also stores any additional 
     site properties extracted from the calculation.
     """
+
+    # Dictionary mapping elements to their default valence electron counts 
+    # as it appears in the VASP POTCAR files.
+    valence_electrons = {
+        "Au": 11, "Fe": 8, "Os": 8, "Ru": 14, "Ti": 12, "O":  6,
+        "Co": 9,  "Rh": 15, "Ir": 9, "Ni": 10, "Pd": 10, "Pt": 10,
+        "Cu": 11, "Ag": 11, "Al": 3
+    }
 
     def __init__(
             self, name: str, 
@@ -157,38 +171,6 @@ class ChemicalEntity:
             return None
 
         return self._structure.cart_coords.copy()
-    
-    @property
-    def bader_charges(self) -> np.ndarray | None:
-        """Returns the Bader charges as a numpy array, if available."""
-        if self._structure is None:
-            logging.warning(
-                "Bader charges are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-        if "bader_charge" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_charge"])
-        
-        logging.warning("Bader charges are not available.")
-        return None
-
-    @property
-    def bader_magnetic_moments(self) -> np.ndarray | None:
-        """Returns the Bader magnetic moments as a numpy array, if available."""
-        if self._structure is None:
-            logging.warning(
-                "Bader magnetic moments are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-        if "bader_magmom" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_magmom"])
-        
-        logging.warning("Bader magnetic moments are not available.")
-        return None
 
     @property
     def composition(self) -> dict[str, float] | None:
@@ -210,6 +192,164 @@ class ChemicalEntity:
             return None
         total = sum(comp.values())
         return {el: amt / total for el, amt in comp.items()}
+    
+    @property
+    def bader_charges(self) -> np.ndarray | None:
+        """Returns the Bader charges as a numpy array, if available."""
+        if self._structure is None:
+            logging.warning(
+                "Bader charges are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+        if "bader_charge" in self._structure.site_properties:
+            return np.array(self._structure.site_properties["bader_charge"])
+        
+        logging.warning("Bader charges are not available.")
+        return None
+
+    def bader_net_charges(self, valence_electrons: dict[str, int] = None) -> float | None:
+        """
+        Calculates the net Bader charges based on the provided valence electron counts.
+
+        Args:
+            valence_electrons (dict[str, int], optional): A dictionary mapping element symbols
+                to their respective valence electron counts. If not provided, the method
+                will use the `valence_electrons` attribute of the instance.
+
+        Returns:
+            float: The net Bader charge of the system.
+            None: If the calculation cannot be performed.
+        """
+        if "bader_net_charges" in self._structure.site_properties:
+            return np.array(self._structure.site_properties["bader_net_charges"])
+
+        if self._structure is None:
+            logging.warning(
+                "Net Bader charges are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+
+        bader_charges = self.bader_charges
+        if bader_charges is None:
+            logging.warning(
+                "Net Bader charges are not available since Bader charges are not set."
+            )
+            return None
+        
+        if valence_electrons is not None:
+            val_electrons = self.valence_electrons | valence_electrons
+        else:
+            val_electrons = self.valence_electrons
+
+        try:
+            bader_net_charges = calculate_bader_net_charges(
+                geometry=self._structure,
+                bader_charges=bader_charges,
+                valence_electrons=val_electrons
+            )
+        except (
+            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
+            ValueError, TypeError
+        ) as e:
+            logging.warning(f"Failed to calculate net Bader charges: {e}")
+            return None
+
+        self._structure.add_site_property("bader_net_charges", bader_net_charges)
+        return bader_net_charges
+
+
+    def sum_bader_charges(self, valence_electrons: dict[str, int] = None) -> dict[str, float] | None:
+        """
+        Sums the net Bader charges per species.
+
+        Args:
+            valence_electrons (dict[str, int], optional): A dictionary mapping element symbols
+                to their respective valence electron counts. If not provided, the method
+                will use the `valence_electrons` attribute of the instance.
+
+        Returns:
+            dict[str, float]: Summed net Bader charges grouped by species, 
+                or None if Bader charges are not available.
+        """
+        if self._structure is None:
+            logging.warning(
+                "Net Bader charges are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+
+        bader_charges = self.bader_charges
+        if bader_charges is None:
+            logging.warning(
+                "Net Bader charges are not available since Bader charges are not set."
+            )
+            return None
+    
+        try:
+            return sum_bader_net_charges(
+                geometry=self._structure,
+                net_bader_charges=self.bader_net_charges(
+                    valence_electrons=valence_electrons 
+                    if valence_electrons is not None else None)
+            ) if self.bader_charges is not None else None
+        except (
+            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
+            ChargeNeutralityError, ValueError, TypeError
+        ) as e:
+            logging.warning(f"Failed to sum Bader charges: {e}")
+            return None
+
+    @property
+    def bader_magnetic_moments(self) -> np.ndarray | None:
+        """Returns the Bader magnetic moments as a numpy array, if available."""
+        if self._structure is None:
+            logging.warning(
+                "Bader magnetic moments are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+        if "bader_magmom" in self._structure.site_properties:
+            return np.array(self._structure.site_properties["bader_magmom"])
+        
+        logging.warning("Bader magnetic moments are not available.")
+        return None
+
+    @property
+    def sum_bader_magmoms(self) -> dict[str, float] | None:
+        """Sums the Bader magnetic moments per species."""
+        if self._structure is None:
+            logging.warning(
+                "Bader magnetic moments are not available since the structure is not set. "
+                f"Create a new {self.__class__.__name__} with a structure to access "
+                "the attribute."
+            )
+            return None
+
+        bader_magmoms = self.bader_magnetic_moments
+        if bader_magmoms is None:
+            logging.warning(
+                "Bader magnetic moments are not available since Bader magnetic moments are not set."
+            )
+            return None
+
+        try:
+            return sum_bader_magnetic_moments(
+                geometry=self._structure,
+                bader_magnetic_moments=self.bader_magnetic_moments,
+                total_magnetic_moment=self.net_magmom,
+            ) if self.bader_magnetic_moments is not None else None
+        except (
+            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
+            MagneticMomentMismatchError, ValueError, TypeError
+        ) as e:
+            logging.warning(f"Failed to sum Bader magnetic moments: {e}")
+            return None
 
     @classmethod
     def from_vasp(cls, directory: str | Path, name: str = None):

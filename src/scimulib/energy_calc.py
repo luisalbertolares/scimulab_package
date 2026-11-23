@@ -1,87 +1,239 @@
+from collections.abc import Mapping
+
 import math
 import numpy as np
 
+from scimulib.exceptions import EnergyCalculationError, StoichiometryError, MissingReferenceError
 
-def cohesive_energy(total_energy: float, atomic_energies: dict[str, float], atom_counts: dict[str, int]) -> float:
+
+def _calculate_energy_difference(
+    final_energy: float,
+    reference_energies: Mapping[str, float],
+    coefficients: Mapping[str, float],
+) -> float:
+    """Computes a generic relative energy against a linear combination of references.
+
+    Performs the operation:
+        E_rel = E_final - sum(coeff_i * E_ref_i)
+
+    Args:
+        final_energy: Total energy of the final state (e.g., cluster, bulk, or
+            adsorbed complex) in consistent energy units (typically eV).
+        reference_energies: Mapping of component/species identifiers to their
+            reference energies.
+        coefficients: Mapping of component/species identifiers to their weighting
+            or stoichiometric coefficients in the initial state.
+
+    Returns:
+        The relative energy difference (final state minus weighted initial state).
+
+    Raises:
+        StoichiometryError: If `coefficients` is empty or any coefficient is
+            non-finite (NaN or Inf).
+        MissingReferenceError: If `reference_energies` is empty or any key in 
+            `coefficients` is missing from `reference_energies`.
+        EnergyCalculationError: If `final_energy` or any used reference energy
+            is non-finite (NaN or Inf).
     """
-    Calculates the cohesive energy per atom of a system.
+    if not reference_energies:
+        raise MissingReferenceError(
+            "Reference energies dictionary cannot be empty.", missing_species=[]
+        )
 
-    This function evaluates stability based on the difference between the sum 
-    of the isolated atoms' energies and the optimized system's total energy, 
-    normalized by the total number of particles.
+    if not coefficients:
+        raise StoichiometryError("Coefficients dictionary cannot be empty.")
+
+    if not math.isfinite(final_energy):
+        raise EnergyCalculationError(f"Final energy must be finite, got {final_energy}.")
+
+    missing_refs = sorted(coefficients.keys() - reference_energies.keys())
+    if missing_refs:
+        raise MissingReferenceError(
+            f"Missing reference energies for: {missing_refs}",
+            missing_species=missing_refs,
+        )
+
+    terms = []
+    for key, coeff in coefficients.items():
+        if not math.isfinite(coeff):
+            raise StoichiometryError(
+                f"Stoichiometric coefficient for '{key}' must be finite, got {coeff}."
+            )
+        ref_energy = reference_energies[key]
+        if not math.isfinite(ref_energy):
+            raise EnergyCalculationError(
+                f"Reference energy for '{key}' must be finite, got {ref_energy}."
+            )
+        terms.append(coeff * ref_energy)
+
+    return final_energy - math.fsum(terms)
+
+
+def _calculate_weighted_energy(
+    system_energy: float,
+    reference_energies: Mapping[str, float],
+    atomic_fractions: Mapping[str, float],
+) -> float:
+    """Calculates relative energy using fractional composition weights.
+
+    If `system_energy` is per atom or per formula unit, the reference energies
+    should be on the same basis. Designed for quantities such as mixing, excess,
+    or cohesive energies where reference energies are weighted by their
+    respective atomic fractions:
+        E_rel = E_system - sum(x_i * E_ref_i),  with sum(x_i) == 1.0
+
+    Args:
+        system_energy: Energy of the final state of the system.
+        reference_energies: Mapping of element symbols to their reference
+            energies.
+        atomic_fractions: Mapping of element symbols to their atomic fractions
+            in the system. Values must be non-negative and sum to 1.0 within a
+            tolerance of 1e-4.
+
+    Returns:
+        The composition-weighted relative energy in the same units as the inputs.
+
+    Raises:
+        StoichiometryError: If `atomic_fractions` is empty, contains negative
+            or non-finite values, or its sum deviates from 1.0 by more than 1e-4.
+        MissingReferenceError: If any element in `atomic_fractions` is missing
+            from `reference_energies`.
+        EnergyCalculationError: If any input energy is non-finite.
+    """
+    if not atomic_fractions:
+        raise StoichiometryError("Atomic fractions dictionary cannot be empty.")
+
+    for species, fraction in atomic_fractions.items():
+        if not math.isfinite(fraction) or fraction < 0.0:
+            raise StoichiometryError(
+                f"Atomic fraction for '{species}' must be non-negative and "
+                f"finite, got {fraction}."
+            )
+
+    total_fraction = math.fsum(atomic_fractions.values())
+    if not math.isclose(total_fraction, 1.0, rel_tol=0.0, abs_tol=1e-4):
+        raise StoichiometryError(
+            f"Atomic fractions must sum to 1.0. Current sum: {total_fraction:.4f}. "
+            "Ensure you are passing fractions, not total atom counts."
+        )
+
+    return _calculate_energy_difference(system_energy, reference_energies, atomic_fractions)
+
+
+def _calculate_interaction_energy(
+    system_energy: float,
+    reference_energies: Mapping[str, float],
+    stoichiometry: Mapping[str, int | float] | None = None,
+) -> float:
+    """Calculates interaction, adsorption, or binding energy from reference subsystems.
+
+    Designed for systems where the final state is formed by combining isolated
+    fragments or fractional molecular references (e.g., a nanoparticle deposited
+    on an oxide slab, or atomic H adsorption referenced to 0.5 * E(H2)):
+        E_int = E_system - sum(n_i * E_ref_i)
+
+    Args:
+        system_energy: Total energy of the combined final system.
+        reference_energies: Mapping of subsystem or reference species names to
+            the total energies of their isolated states.
+        stoichiometry: Optional mapping of reference names to positive
+            stoichiometric coefficients (integers or floats) in the final
+            system. If `None`, a stoichiometric coefficient of 1.0 is assumed
+            for every entry in `reference_energies`.
+
+    Returns:
+        The total interaction/adsorption energy (negative values typically
+        indicate thermodynamically favorable binding).
+
+    Raises:
+        StoichiometryError: If no reference subsystems are provided or if any
+            stoichiometric coefficient is non-finite or less than or equal to zero.
+        MissingReferenceError: If any subsystem specified in `stoichiometry` is
+            missing from `reference_energies`.
+        EnergyCalculationError: If any input energy is non-finite.
+    """
+    coeffs = (
+        stoichiometry
+        if stoichiometry is not None
+        else dict.fromkeys(reference_energies, 1.0)
+    )
+
+    if not coeffs:
+        raise StoichiometryError("At least one reference subsystem must be provided.")
+
+    for subsystem, count in coeffs.items():
+        if not math.isfinite(count) or count <= 0.0:
+            raise StoichiometryError(
+                f"Stoichiometric coefficient for '{subsystem}' must be positive "
+                f"and finite, got {count}."
+            )
+
+    return _calculate_energy_difference(system_energy, reference_energies, coeffs)
+
+
+def calculate_cohesive_energy(
+    total_energy: float, 
+    atomic_energies: dict[str, float], 
+    atomic_counts: dict[str, int]
+) -> float:
+    """
+    Calculates the cohesive energy per atom for a multi-atomic system.
 
     Args:
         total_energy (float): The total energy of the system.
-        atomic_energies (dict[str, float]): Reference energies for isolated atoms.
-            Example: {'Au': -0.12, 'Ti': -7.85}.
-        atom_counts (dict[str, int]): Stoichiometry of the current system.
-            Example: {'Au': 12, 'Ti': 48, 'O': 95}.
+        atomic_energies (dict[str, float]): Reference energies for each atomic species.
+        atomic_counts (dict[str, int]): Number of atoms for each species in the system.
 
     Returns:
-        float: The cohesive energy per atom (in the same units as the 
-                inputs, typically eV/atom).
+        float: The cohesive energy per atom (eV/atom).
 
     Raises:
-        KeyError: If there are missing reference energies for any element in the system.
-        ValueError: If the system contains no valid atoms (zero particles).
+        StoichiometryError: If any stoichiometric coefficient is non-finite or less 
+            than or equal to zero.
+        MissingReferenceError: If any atomic species in `atomic_counts` is missing 
+            from `atomic_energies`.
+        EnergyCalculationError: If any input energy is non-finite.
     """
-    
-    # 1. Validate that no atom energy references are missing
-    missing_refs = set(atom_counts.keys()) - set(atomic_energies.keys())
-    if missing_refs:
-        raise KeyError(f"Missing reference energies for: {missing_refs}")
+    total_atoms = sum(atomic_counts.values())
+    return - _calculate_interaction_energy(
+        system_energy=total_energy,
+        reference_energies=atomic_energies,
+        stoichiometry=atomic_counts
+    ) / total_atoms
 
-    # 2. Filter valid quantities and count total particles
-    valid_counts = {elem: count for elem, count in atom_counts.items() if count > 0}
-    total_particles = sum(valid_counts.values())
-    
-    if total_particles == 0:
-        raise ValueError("The system has no valid atoms. Cannot calculate cohesive energy.")
-
-    # 3. Direct mathematical calculation
-    isolated_total_energy = sum(valid_counts[elem] * atomic_energies[elem] for elem in valid_counts)
-    
-    return (isolated_total_energy - total_energy) / total_particles
-
-
-def ideal_cohesive_energy(mono_cohesive_energies: dict[str, float], atomic_fractions: dict[str, float]) -> float:
+def calculate_ideal_cohesive_energy(
+    mono_cohesive_energies: dict[str, float], 
+    atomic_fractions: dict[str, float]
+) -> float:
     """
-    Calculates the ideal cohesive energy (without mixing interaction) for a multi-metallic cluster.
+    Calculates the ideal cohesive energy (without mixing interaction) for a 
+    multi-metallic cluster.
 
-    This represents the weighted average of the pure monometallic cohesive energies.
+    This represents the weighted average of the pure monometallic cohesive 
+    energies.
 
     Args:
-        mono_cohesive_energies (dict[str, float]): Cohesive energies of the pure monometallic clusters.
+        mono_cohesive_energies (dict[str, float]): Cohesive energies of the 
+            pure monometallic clusters.
             Example: {'Au': -3.12, 'Co': -4.39, 'Cu': -3.49}.
-        atomic_fractions (dict[str, float]): Atomic fractions of each metal in the cluster.
+        atomic_fractions (dict[str, float]): Atomic fractions of each metal 
+            in the cluster.
             Example: {'Au': 0.5, 'Co': 0.25, 'Cu': 0.25}.
 
     Returns:
         float: The ideal cohesive energy (eV/atom).
 
     Raises:
-        KeyError: If there are missing reference energies for any element in the cluster.
-        ValueError: If the sum of atomic fractions is not equal to 1.0.
+        StoichiometryError: If any atomic fraction is non-finite or less than zero. 
+        MissingReferenceError: If any atomic species in `atomic_fractions` is missing 
+            from `mono_cohesive_energies`.
+        EnergyCalculationError: If any input energy is non-finite.
     """
-    
-    # 1. Validate missing monometallic references
-    missing_refs = set(atomic_fractions.keys()) - set(mono_cohesive_energies.keys())
-    if missing_refs:
-        raise KeyError(f"Missing monometallic cohesive energies for: {missing_refs}")
-
-    # 2. Thermodynamic constraint: Fractions must sum to 1.0
-    total_fraction = sum(atomic_fractions.values())
-    if not math.isclose(total_fraction, 1.0, rel_tol=1e-4, abs_tol=1e-4):
-        raise ValueError(
-            f"Atomic fractions must sum to 1.0. Current sum: {total_fraction:.4f}. "
-            "Ensure you are passing fractions, not total atom counts."
-        )
-
-    # 3. Mathematical calculation: sum(x_i * E_coh_i)
-    return sum(fraction * mono_cohesive_energies[elem] for elem, fraction in atomic_fractions.items())
+    neg_coh_energies = {subsys: -energy for subsys, energy in mono_cohesive_energies.items()}
+    return _calculate_weighted_energy(0.0, neg_coh_energies, atomic_fractions)
 
 
-def mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> float:
+def calculate_mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> float:
     """
     Calculates the cohesive energy of mixing for a cluster.
 
@@ -93,41 +245,22 @@ def mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> float:
         float: The cohesive energy of mixing (eV/atom).
 
     Raises:
-        ValueError: If the total number of atoms is zero or negative.
+        StoichiometryError: If the total number of atoms is zero or negative.
     """
-    
-    # 1. Physical constraint validation
     if total_atoms <= 0:
-        raise ValueError(f"The total number of atoms must be greater than zero. Current value: {total_atoms}")
-
-    # 2. Mathematical calculation
-    # Python will naturally raise a TypeError if the inputs are strings or incompatible types
+        raise StoichiometryError(
+            "The total number of atoms must be greater than zero. "
+            f"Current value: {total_atoms}"
+        )
+    
     return -(mixing_energy / total_atoms)
 
 
-def _calculate_relative_energy(cluster_energy: float, reference_energies: dict[str, float], atomic_fractions: dict[str, float]) -> float:
-    """
-    Internal function to calculate relative energies based on a weighted reference.
-    
-    Performs the operation: E_cluster - sum(fraction_i * E_reference_i).
-    """
-    missing_refs = set(atomic_fractions.keys()) - set(reference_energies.keys())
-    if missing_refs:
-        raise KeyError(f"Missing reference energies for: {missing_refs}")
-
-    total_fraction = sum(atomic_fractions.values())
-    if not math.isclose(total_fraction, 1.0, rel_tol=1e-4, abs_tol=1e-4):
-        raise ValueError(
-            f"Atomic fractions must sum to 1.0. Current sum: {total_fraction:.4f}. "
-            "Ensure you are passing fractions, not total atom counts."
-        )
-
-    weighted_energy = sum(fraction * reference_energies[elem] for elem, fraction in atomic_fractions.items())
-    
-    return cluster_energy - weighted_energy
-
-
-def mixing_energy(alloy_energy: float, relaxed_energies: dict[str, float], atomic_fractions: dict[str, float]) -> float:
+def calculate_mixing_energy(
+    alloy_energy: float, 
+    relaxed_energies: dict[str, float], 
+    atomic_fractions: dict[str, float]
+) -> float:
     """
     Calculates the total mixing energy for a multi-metallic cluster.
 
@@ -143,15 +276,20 @@ def mixing_energy(alloy_energy: float, relaxed_energies: dict[str, float], atomi
     Returns:
         float: The mixing energy in the same units as the inputs (typically eV).
 
-    Note:
-        Formula: E_mix = E_alloy - sum(x_i * E_relaxed_i)
-        A negative value indicates that the formation of the alloy is 
-        thermodynamically favorable compared to the segregated pure metals.
+    Raises:
+        StoichiometryError: If the atomic fractions do not sum to 1.
+        MissingReferenceError: If a required reference energy for a monometallic 
+            component is missing.
+        EnergyCalculationError: If any input energy is non-finite.
     """
-    return _calculate_relative_energy(alloy_energy, relaxed_energies, atomic_fractions)
+    return _calculate_weighted_energy(alloy_energy, relaxed_energies, atomic_fractions)
 
 
-def interact_mixing_energy(alloy_energy: float, frozen_energies: dict[str, float], atomic_fractions: dict[str, float]) -> float:
+def calculate_interact_mixing_energy(
+    alloy_energy: float, 
+    frozen_energies: dict[str, float], 
+    atomic_fractions: dict[str, float]
+) -> float:
     """
     Calculates the interaction contribution to the mixing energy.
 
@@ -167,13 +305,20 @@ def interact_mixing_energy(alloy_energy: float, frozen_energies: dict[str, float
     Returns:
         float: Interaction contribution to the mixing energy (eV).
 
-    Note:
-        Formula: E_interact = E_alloy - sum(x_i * E_frozen_i)
+    Raises:
+        StoichiometryError: If the atomic fractions do not sum to 1.
+        MissingReferenceError: If a required reference energy for a monometallic 
+            component is missing.
+        EnergyCalculationError: If any input energy is non-finite.
     """
-    return _calculate_relative_energy(alloy_energy, frozen_energies, atomic_fractions)
+    return _calculate_weighted_energy(alloy_energy, frozen_energies, atomic_fractions)
 
 
-def strain_mixing_energy(frozen_energies: dict[str, float], relaxed_energies: dict[str, float], atomic_fractions: dict[str, float]) -> float:
+def strain_mixing_energy(
+    frozen_energies: dict[str, float], 
+    relaxed_energies: dict[str, float], 
+    atomic_fractions: dict[str, float]
+) -> float:
     """
     Calculates the strain contribution to the mixing energy in a multi-metallic cluster.
 
@@ -199,21 +344,17 @@ def strain_mixing_energy(frozen_energies: dict[str, float], relaxed_energies: di
         Formula: E_strain = sum(x_i * (E_frozen_i - E_relaxed_i))
         By definition, E_mix = E_interact + E_strain.
     """
-    
     # Validate missing references across both dictionaries
     elements = set(atomic_fractions.keys())
-    if not elements.issubset(frozen_energies.keys()) or not elements.issubset(relaxed_energies.keys()):
-        raise KeyError("Missing frozen or relaxed reference energies for one or more elements.")
+    if (not elements.issubset(frozen_energies.keys()) 
+        or not elements.issubset(relaxed_energies.keys())
+    ):
+        raise MissingReferenceError(
+            "Missing frozen or relaxed reference energies for one or more elements."
+        )
 
-    # Thermodynamic constraint
-    total_fraction = sum(atomic_fractions.values())
-    if not math.isclose(total_fraction, 1.0, rel_tol=1e-4, abs_tol=1e-4):
-        raise ValueError(f"Atomic fractions must sum to 1.0. Current sum: {total_fraction:.4f}")
-
-    # Calculate strain: sum(x_i * (E_frozen_i - E_relaxed_i))
-    strain_energy = sum(
-        fraction * (frozen_energies[elem] - relaxed_energies[elem]) 
-        for elem, fraction in atomic_fractions.items()
-    )
+    neg_relaxed_energies = {subsys: -energy for subsys, energy in relaxed_energies.items()}
+    strain_energy_frozen = _calculate_weighted_energy(0.0, frozen_energies, atomic_fractions)
+    strain_energy_relaxed = _calculate_weighted_energy(0.0, neg_relaxed_energies, atomic_fractions)
     
-    return strain_energy
+    return strain_energy_frozen + strain_energy_relaxed

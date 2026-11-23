@@ -7,12 +7,14 @@ from functools import wraps
 
 import numpy as np
 
-from pymatgen.io.vasp.outputs import Vasprun, Oszicar
+from pymatgen.io.vasp.outputs import  Vasprun, Oszicar, Potcar
 from pymatgen.core import Structure, Lattice
 
 from scimulib.import_utils import check_pymatgen_imports
-from scimulib.exceptions import VaspExtractionError, VasprunError, OszicarError, OutcarError, \
+from scimulib.exceptions import (
+    VaspExtractionError, VasprunError, OszicarError, OutcarError, PotcarError, 
     BaderExtractionError, AcfError
+)
 
 
 class VaspParser:
@@ -53,10 +55,12 @@ class VaspParser:
         self._outcar_path: Path = self._directory / "OUTCAR"
         self._oszicar_path: Path = self._directory / "OSZICAR"
         self._doscar_path: Path = self._directory / "DOSCAR"
+        self._potcar_path: Path = self._directory / "POTCAR"
 
         self._vasprun: Vasprun | None = None
         self._vasprun_params: dict = {}
         self._oszicar: Oszicar | None = None
+        self._potcar: Potcar | None = None
 
     def __repr__(self):
         return f"VASP outputs directory: {self._directory}"
@@ -157,31 +161,30 @@ class VaspParser:
     ):
         """
         Loads the OSZICAR file using Pymatgen's Oszicar class and extracts a specific 
-        property from a given ionic or electronic step.
-        For ionic steps, valid properties are: 'free_energy', 'energy_without_entropy', 
-        'delta_energy', 'temperature', 'magnetization'.
-        For electronic steps, valid properties are: 'energy', 'delta_energy', 'deps', 
-        'rms', 'rms_c', 'iterations'.
+        property from a given ionic or electronic step. For ionic steps, valid properties are: 
+        `free_energy`, `energy_without_entropy`, `delta_energy`, `temperature`, `magnetization`. 
+        For electronic steps, valid properties are: `energy`, `delta_energy`, `deps`, 
+        `rms`, `rms_c`, `iterations`.
 
         Args:
-            step_type (str): The type of step to query, either 'ionic' or 'electronic'.
+            step_type (str): The type of step to query, either `ionic` or `electronic`.
             property_name (str): The plain English name of the property to extract.
             ionic_step_number (int): The index of the ionic step to query. Defaults 
                 to -1 (the last step).
             electronic_step_number (int): The index of the electronic step to query 
-                (only used if step_type is 'electronic'). Defaults to -1 (the last step).
+                (only used if step_type is `electronic`). Defaults to -1 (the last step).
 
         Returns:
             Any: The requested property from the specified step.
 
         Raises:
-            ValueError: If the step_type is invalid or if the property_name is not 
-                supported for the given step_type. Also raised if OSZICAR path is not 
+            ValueError: If the `step_type` is invalid or if the `property_name` is not 
+                supported for the given `step_type`. Also raised if OSZICAR path is not 
                 set correctly.
             FileNotFoundError: If the OSZICAR file does not exist or is invalid.
             OszicarError: If the OSZICAR file cannot be parsed, if the step indices 
-            are out of bounds, or if the mapped key is missing in the Pymatgen step 
-            dictionary.
+                are out of bounds, or if the mapped key is missing in the Pymatgen step 
+                dictionary.
         """
         if not isinstance(self._oszicar_path, Path):
             raise ValueError("OSZICAR path is not set or is not a Path instance.")
@@ -259,6 +262,87 @@ class VaspParser:
                 f"The expected key '{pymatgen_key}' (property: '{property_name}') was not "
                 "found in the requested step."
             ) from e
+
+    def extract_potcar_property(self, property_name: str):
+        """
+        Loads the POTCAR file using Pymatgen's `Potcar` class and extracts a 
+        specific property. Supports both container-level `Potcar` attributes 
+        (e.g., 'symbols', 'functional') and per-species `PotcarSingle` attributes 
+        (e.g., 'zval', 'enmax', 'nelectrons').
+
+        For `PotcarSingle` attributes, values are returned as a dictionary keyed 
+        by element symbol, deduplicating repeated species with identical values.
+
+        Args:
+            property_name (str): Specific attribute to extract from the Potcar 
+                or PotcarSingle objects.
+
+        Returns:
+            Any: The requested property extracted from the Potcar object, or a 
+                dict mapping element symbols to the requested `PotcarSingle` 
+                attribute.
+
+        Raises:
+            ValueError: If the POTCAR path is not set or is not a Path instance.
+            FileNotFoundError: If the POTCAR file does not exist or is invalid.
+            AttributeError: If the requested property does not exist in `Potcar` 
+                or `PotcarSingle`.
+            PotcarError: If an unexpected error occurs during parsing, property 
+                extraction, or if duplicate species have conflicting values.
+        """
+        if not isinstance(self._potcar_path, Path):
+            raise ValueError("POTCAR path is not set or is not a Path instance.")
+        if not self._potcar_path.is_file():
+            raise FileNotFoundError(f"POTCAR file not found at {self._potcar_path}.")
+
+        # If the Potcar object has not been initialized, parse the file.
+        if self._potcar is None:
+            try:
+                self._potcar = Potcar.from_file(self._potcar_path)
+            except Exception as e:
+                raise PotcarError(
+                    f"Internal pymatgen failure in Potcar: {type(e).__name__} - {e}"
+                ) from e
+
+        # 1. Try accessing the property directly on the Potcar container.
+        if hasattr(self._potcar, property_name):
+            try:
+                return getattr(self._potcar, property_name)
+            except Exception as e:
+                raise PotcarError(
+                    f"Failed to access property '{property_name}' in Potcar: "
+                    f"{type(e).__name__} - {e}"
+                ) from e
+
+        # 2. Otherwise, extract the property from each PotcarSingle entry.
+        if not self._potcar:
+            raise PotcarError(f"POTCAR at {self._potcar_path} contains no species.")
+
+        result = {}
+        for potcar_single in self._potcar:
+            try:
+                value = getattr(potcar_single, property_name)
+            except AttributeError:
+                raise AttributeError(
+                    f"Property '{property_name}' does not exist in Potcar or PotcarSingle."
+                )
+            except Exception as e:
+                raise PotcarError(
+                    f"Failed to access property '{property_name}' in PotcarSingle "
+                    f"for '{potcar_single.element}': {type(e).__name__} - {e}"
+                ) from e
+
+            elem = potcar_single.element
+            if elem in result:
+                if result[elem] != value:
+                    raise PotcarError(
+                        f"Conflicting '{property_name}' values found for species '{elem}': "
+                        f"{result[elem]} vs {value}."
+                    )
+                continue
+            result[elem] = value
+
+        return result
 
     def extract_outcar_property(
             self, 
@@ -358,6 +442,82 @@ class VaspParser:
             f"Pattern(s) {target_patterns} not found for '{property_name}'. "
             "File may be empty, incomplete, or the calculation did not reach this step."
         )
+
+    def extract_outcar_valence_electrons(self) -> dict[str, float]:
+        """
+        Generalized method to extract the valence electrons (ZVAL) per species 
+        from an OUTCAR file.
+
+        This method employs a fast forward scan restricted to the file header to 
+        extract elemental species ('VRHFIN') and their corresponding valence 
+        electrons ('ZVAL'). Duplicate species sharing the same valence (e.g., 
+        distinct atomic environments using the same POTCAR) are deduplicated so 
+        each species appears only once in the returned dictionary.
+
+        Returns:
+            dict[str, float]: A dictionary mapping each unique element symbol to 
+                its number of valence electrons (e.g., {'O': 6.0, 'Ti': 10.0}).
+
+        Raises:
+            ValueError: If the OUTCAR path is not set correctly or if it is not a Path instance.
+            FileNotFoundError: If the specified OUTCAR file does not exist or is invalid.
+            OutcarError: If a system-related error occurs during reading, if 'VRHFIN' 
+                or 'ZVAL' cannot be found, if their counts do not match, or if the 
+                same species is found with conflicting valence values.
+        """
+        if not isinstance(self._outcar_path, Path):
+            raise ValueError("OUTCAR path is not set or is not a Path instance.")
+        if not self._outcar_path.is_file():
+            raise FileNotFoundError(f"OUTCAR file not found at {self._outcar_path}.")
+
+        species_names = []
+        zval_values = []
+
+        # Fast forward scan to extract species and valence electrons from the header.
+        try:
+            with open(self._outcar_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for _ in range(5000):
+                    line = f.readline()
+                    if not line:
+                        break
+
+                    if "VRHFIN" in line:
+                        elem = line.split("=")[1].split(":")[0].strip()
+                        species_names.append(elem)
+
+                    elif "ZVAL" in line and "=" in line:
+                        parts = line.split("=")[1].split()
+                        zval_values = [float(x) for x in parts]
+                        break
+        except (OSError, IndexError, ValueError) as e:
+            raise OutcarError(
+                f"Failed to parse header of OUTCAR at {self._outcar_path}."
+            ) from e
+
+        if not species_names or not zval_values:
+            raise OutcarError(
+                "Could not find 'VRHFIN' or 'ZVAL' in the header. "
+                "File may be empty or invalid."
+            )
+
+        if len(species_names) != len(zval_values):
+            raise OutcarError(
+                f"Header mismatch in OUTCAR: found {len(species_names)} species in 'VRHFIN' "
+                f"but {len(zval_values)} entries in 'ZVAL'."
+            )
+
+        valence_electrons: dict[str, float] = {}
+        for elem, zval in zip(species_names, zval_values):
+            if elem in valence_electrons:
+                if valence_electrons[elem] != zval:
+                    raise OutcarError(
+                        f"Conflicting ZVAL values found for species '{elem}': "
+                        f"{valence_electrons[elem]} vs {zval}."
+                    )
+                continue
+            valence_electrons[elem] = zval
+
+        return valence_electrons
 
     def extract_outcar_structure(self) -> Structure:
         """
@@ -663,6 +823,25 @@ class VaspParser:
             f"Unable to extract geometry from any VASP output files in: {self._directory}."
         )
 
+    def get_valence_electrons(self) -> dict[str, int] | None:
+        try:
+            valence_electrons = self.extract_outcar_valence_electrons()
+            return valence_electrons
+        except (FileNotFoundError, ValueError, OutcarError) as e:
+            logging.warning(
+                f"Failed to extract valence electrons from OUTCAR "
+                f"({type(e).__name__} - {e}). Trying POTCAR."
+            )
+
+        try:
+            valence_electrons = self.extract_potcar_property("nelectrons")
+            return valence_electrons
+        except (FileNotFoundError, ValueError, PotcarError) as e:
+            logging.warning(
+                f"Failed to extract valence electrons from POTCAR "
+                f"({type(e).__name__} - {e})."
+            )
+            return None
 
 class BaderParser:
     """

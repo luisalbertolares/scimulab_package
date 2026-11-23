@@ -34,6 +34,14 @@ class OutcarError(VaspExtractionError):
     pass
 
 
+class PotcarError(VaspExtractionError):
+    """
+    Exception raised for errors occurring during the parsing or extraction of 
+    data from the 'POTCAR' file.
+    """
+    pass
+
+
 # The following classes define custom exceptions for handling errors related to Bader analysis output files.
 class BaderExtractionError(Exception):
     """

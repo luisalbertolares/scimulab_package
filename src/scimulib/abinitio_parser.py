@@ -841,7 +841,7 @@ class VaspParser:
                 f"Failed to extract valence electrons from POTCAR "
                 f"({type(e).__name__} - {e})."
             )
-            return None
+            return {}
 
 class BaderParser:
     """

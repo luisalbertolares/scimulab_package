@@ -10,7 +10,7 @@ import numpy as np
 from pymatgen.io.vasp.outputs import  Vasprun, Oszicar, Potcar
 from pymatgen.core import Structure, Lattice
 
-from scimulib.import_utils import check_pymatgen_imports
+from scimulib.validation_utils import check_pymatgen_imports
 from scimulib.exceptions import (
     VaspExtractionError, VasprunError, OszicarError, OutcarError, PotcarError, 
     BaderExtractionError, AcfError

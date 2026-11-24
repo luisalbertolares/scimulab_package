@@ -8,11 +8,11 @@ import numpy as np
 
 from pymatgen.core import Molecule, Structure
 
-from scimulib.import_utils import check_pymatgen_imports
+from scimulib.validation_utils import ReferencePolicy, check_pymatgen_imports
 from scimulib.exceptions import (
     VaspExtractionError, BaderExtractionError, 
     MissingDataError, MissingGeometryError, NonPeriodicGeometryError, MissingSitePropertyError,
-    MissingReferenceError, StoichiometryError
+    MissingReferenceError, StoichiometryError, MismatchedGeometryError
 )
 from scimulib.visualization import AxesMode, LabelMode, RenderStyle, build_py3dmol_view
 from scimulib.abinitio_parser import VaspParser, BaderParser
@@ -212,6 +212,39 @@ class ChemicalEntity:
                 f"{self.__class__.__name__} instance."
             )
         return np.array(geometry.site_properties[property_name], dtype=float)
+
+    def _validate_reference(self, ref: Self, policy: ReferencePolicy) -> None:
+        comp = ref.composition
+        total_atoms = sum(comp.values())
+
+        if policy.single_species and len(comp) != 1:
+            raise StoichiometryError(
+                f"{policy.label.capitalize()} references must represent a single "
+                f"species, got: {list(comp.keys())}."
+            )
+
+        if policy.expected_atoms is not None and total_atoms != policy.expected_atoms:
+            raise StoichiometryError(
+                f"{policy.label.capitalize()} references must have {policy.expected_atoms} "
+                f"atom(s), got: {total_atoms}."
+            )
+
+        if policy.same_atom_count and total_atoms != len(self._require_geometry):
+            raise StoichiometryError(
+                f"{policy.label.capitalize()} references must match the number of atoms "
+                f"({len(self._require_geometry)}), got: {total_atoms}."
+            )
+
+        if policy.same_geometry and not self.has_same_geometry(ref):
+            raise MismatchedGeometryError(
+                f"{policy.label.capitalize()} references must share the same geometry "
+                f"as {self.__class__.__name__}."
+            )
+
+        if policy.extra_validator is not None:
+            policy.extra_validator(self, ref)
+
+    def _has_same_geometry(self, ref: Self) -> bool:
 
     def _require_calculation_references(self, entity_type: str, *entities: Self, **named_entities: Self | float):
         calculation_references = {}

@@ -25,7 +25,7 @@ def _calculate_energy_difference(
             or stoichiometric coefficients in the initial state.
 
     Returns:
-        The relative energy difference (final state minus weighted initial state).
+        float: The relative energy difference (final state minus weighted initial state).
 
     Raises:
         StoichiometryError: If `coefficients` is empty or any coefficient is
@@ -91,7 +91,7 @@ def _calculate_weighted_energy(
             tolerance of 1e-4.
 
     Returns:
-        The composition-weighted relative energy in the same units as the inputs.
+        float: The composition-weighted relative energy in the same units as the inputs.
 
     Raises:
         StoichiometryError: If `atomic_fractions` is empty, contains negative
@@ -142,8 +142,8 @@ def _calculate_interaction_energy(
             for every entry in `reference_energies`.
 
     Returns:
-        The total interaction/adsorption energy (negative values typically
-        indicate thermodynamically favorable binding).
+        float: The total interaction/adsorption energy (negative values typically
+            indicate thermodynamically favorable binding).
 
     Raises:
         StoichiometryError: If no reference subsystems are provided or if any
@@ -193,6 +193,9 @@ def calculate_cohesive_energy(
         MissingReferenceError: If any atomic species in `atomic_counts` is missing 
             from `atomic_energies`.
         EnergyCalculationError: If any input energy is non-finite.
+
+    Note:
+        Formula: E_coh = (sum(x_i * E_atom_i) - E_total) / total_atoms
     """
     total_atoms = sum(atomic_counts.values())
     return - _calculate_interaction_energy(
@@ -228,6 +231,9 @@ def calculate_ideal_cohesive_energy(
         MissingReferenceError: If any atomic species in `atomic_fractions` is missing 
             from `mono_cohesive_energies`.
         EnergyCalculationError: If any input energy is non-finite.
+
+    Note:
+        Formula: E_ideal_coh = sum(x_i * E_coh_i)
     """
     neg_coh_energies = {subsys: -energy for subsys, energy in mono_cohesive_energies.items()}
     return _calculate_weighted_energy(0.0, neg_coh_energies, atomic_fractions)
@@ -246,6 +252,9 @@ def calculate_mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> 
 
     Raises:
         StoichiometryError: If the total number of atoms is zero or negative.
+
+    Note:
+        Formula: E_mix_coh = - mixing_energy / total_atoms
     """
     if total_atoms <= 0:
         raise StoichiometryError(
@@ -281,6 +290,9 @@ def calculate_mixing_energy(
         MissingReferenceError: If a required reference energy for a monometallic 
             component is missing.
         EnergyCalculationError: If any input energy is non-finite.
+
+    Note:
+        Formula: E_mix = E_alloy - sum(x_i * E_relaxed_i)
     """
     return _calculate_weighted_energy(alloy_energy, relaxed_energies, atomic_fractions)
 
@@ -310,11 +322,15 @@ def calculate_interact_mixing_energy(
         MissingReferenceError: If a required reference energy for a monometallic 
             component is missing.
         EnergyCalculationError: If any input energy is non-finite.
+
+    Note:
+        Formula: E_interact = E_mix - sum(x_i * E_frozen_i)
+        By definition, E_mix = E_interact + E_strain.
     """
     return _calculate_weighted_energy(alloy_energy, frozen_energies, atomic_fractions)
 
 
-def strain_mixing_energy(
+def calculate_strain_mixing_energy(
     frozen_energies: dict[str, float], 
     relaxed_energies: dict[str, float], 
     atomic_fractions: dict[str, float]
@@ -337,8 +353,11 @@ def strain_mixing_energy(
         float: Strain contribution to the mixing energy (eV).
 
     Raises:
-        KeyError: If reference energies are missing in either dictionary.
-        ValueError: If atomic fractions do not sum to 1.0.
+        StoichiometryError: If the atomic fractions do not sum to 1.
+        MissingReferenceError: If a required reference energy for a 
+            monometallic component is missing or an atomic fraction 
+            is missing.
+        EnergyCalculationError: If any input energy is non-finite.
 
     Note:
         Formula: E_strain = sum(x_i * (E_frozen_i - E_relaxed_i))
@@ -358,3 +377,80 @@ def strain_mixing_energy(
     strain_energy_relaxed = _calculate_weighted_energy(0.0, neg_relaxed_energies, atomic_fractions)
     
     return strain_energy_frozen + strain_energy_relaxed
+
+
+def calculate_adsorption_energy(
+    total_energy: float, 
+    clean_surface_energy: float, 
+    adsorbate_energies: float | dict[str, float]
+) -> float:
+    """
+    Calculates the adsorption energy of an adsorbate on a surface.
+
+    Args:
+        total_energy (float): Total energy of the adsorbate-surface system.
+        clean_surface_energy (float): Energy of the clean surface.
+        adsorbate_energies (float | dict[str, float]): Energy of the adsorbate(s). 
+            Can be a single float or a dictionary of adsorbate energies.
+
+    Returns:
+        float: Adsorption energy (eV).
+
+    Raises:
+        TypeError: If the adsorbate energies are not provided as a float or a dictionary.
+        StoichiometryError: If the adsorbate nor clean surface energies are 
+            provided correctly.
+        MissingReferenceError: If a required reference energy for the clean 
+            surface or adsorbate is missing.
+        EnergyCalculationError: If any input energy is non-finite.
+        
+    Note:
+        Formula: E_ads = E_total - E_clean_surface - sum(E_adsorbate_i)
+    """
+    if isinstance(adsorbate_energies, dict):
+        reference_energies = { "clean_surface": clean_surface_energy, **adsorbate_energies }
+    elif isinstance(adsorbate_energies, float):
+        reference_energies = { "clean_surface": clean_surface_energy, "adsorbate": adsorbate_energies }
+    else:
+        raise TypeError(
+            "Adsorbate energies must be provided as a float or a dictionary."
+        )
+
+    return _calculate_interaction_energy(
+        total_energy, 
+        reference_energies
+    )
+
+
+def calculate_vacancy_formation_energy(
+    defective_energy: float,
+    pristine_energy: float,
+    defective_site_energy: float,
+    num_vacancies: int = 1
+) -> float:
+    """
+    Calculates the vacancy formation energy for a defective system.
+
+    Args:
+        defective_energy (float): Energy of the defective system.
+        pristine_energy (float): Energy of the pristine system.
+        defective_site_energy (float): Chemical potential of the defective site.
+        num_vacancies (int, optional): Number of vacancies. Defaults to 1.
+
+    Returns:
+        float: Vacancy formation energy (eV).
+
+    Raises:
+        StoichiometryError: If the number of vacancies is not a positive integer.
+        MissingReferenceError: If a required reference energy for the pristine 
+            system or defective site is missing.
+        EnergyCalculationError: If any input energy is non-finite.
+
+    Note:
+        Formula: E_vac = E_defective - E_pristine + num_vacancies * mu_defective_site
+    """
+    return _calculate_interaction_energy(
+        defective_energy,
+        { "pristine_system": pristine_energy, "defective_site": -1 * defective_site_energy },
+        { "pristine_system": 1, "defective_site": num_vacancies }
+    )

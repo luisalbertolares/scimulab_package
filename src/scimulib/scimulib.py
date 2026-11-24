@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from functools import cached_property, lru_cache
 
 import numpy as np
 
@@ -7,14 +8,15 @@ from pymatgen.core import Molecule, Structure
 
 from scimulib.import_utils import check_pymatgen_imports
 from scimulib.exceptions import (
-    VaspExtractionError, BaderExtractionError, SizeMismatchError, InvalidValenceValueError, 
-    MissingValenceElementError, ChargeNeutralityError, MagneticMomentMismatchError,
-    MissingGeometryError, NonPeriodicGeometryError, MissingSitePropertyError
+    VaspExtractionError, BaderExtractionError, 
+    MissingDataError, MissingGeometryError, NonPeriodicGeometryError, MissingSitePropertyError,
+    MissingReferenceError, StoichiometryError
 )
 from scimulib.abinitio_parser import VaspParser, BaderParser
 from scimulib.bader_calc import (
     calculate_bader_net_charges, sum_bader_net_charges, sum_bader_magnetic_moments
 )
+from scimulib.energy_calc import calculate_cohesive_energy
 
 
 class ChemicalEntity:
@@ -27,9 +29,9 @@ class ChemicalEntity:
     def __init__(
             self, 
             name: str, 
-            total_energy: float | None, 
-            net_magmom: float | None, 
-            geometry: Structure | Molecule | None,
+            total_energy: float | None = None, 
+            net_magmom: float | None = None, 
+            geometry: Structure | Molecule | None = None,
             valence_electrons: dict[str, float] = {}
     ):
         """
@@ -49,13 +51,14 @@ class ChemicalEntity:
         check_pymatgen_imports()
 
         self.name = name
-        self.total_energy = total_energy
-        self.net_magmom = net_magmom
+        self.total_energy = float(total_energy)
+        self.net_magmom = float(net_magmom)
         self.geometry = geometry
+        self.valence_electrons = valence_electrons
 
         if (
             self.total_energy is None 
-            and self.geometry is None 
+            and self._structure is None 
             and self.net_magmom is None
         ):
             raise ValueError(
@@ -74,6 +77,11 @@ class ChemicalEntity:
     @property
     def name(self) -> str:
         """Returns the name of the chemical entity."""
+        if self._name is None:
+            raise MissingDataError(
+                f"Name is not available on this "
+                f"{self.__class__.__name__} instance."
+            )
         return self._name
 
     @name.setter
@@ -84,8 +92,16 @@ class ChemicalEntity:
         self._name = value
 
     @property
-    def total_energy(self) -> float | None:
-        """Returns the total energy of the chemical entity."""
+    def total_energy(self) -> float:
+        """
+        Returns the total energy of the chemical entity or raises 
+        MissingDataError if not available.
+        """
+        if self._total_energy is None:
+            raise MissingDataError(
+                f"Energy is not available on this "
+                f"{self.__class__.__name__} instance."
+            )
         return self._total_energy
 
     @total_energy.setter
@@ -96,8 +112,16 @@ class ChemicalEntity:
         self._total_energy = value
 
     @property
-    def net_magmom(self) -> float | None:
-        """Returns the net magnetic moment of the chemical entity."""
+    def net_magmom(self) -> float:
+        """
+        Returns the net magnetic moment of the chemical entity or raises 
+        MissingDataError if not available.
+        """
+        if self._net_magmom is None:
+            raise MissingDataError(
+                f"Net magnetic moment is not available on this "
+                f"{self.__class__.__name__} instance."
+            )
         return self._net_magmom
 
     @net_magmom.setter
@@ -107,26 +131,29 @@ class ChemicalEntity:
             raise TypeError("Net magnetic moment must be a float or None.")
         self._net_magmom = value
 
-    @property
-    def geometry(self) -> Structure | Molecule | None:
+    @cached_property
+    def geometry(self) -> Structure | Molecule:
         """
         Returns a clean geometric structure 
         (only species, coords, and lattice if applicable).
-        """           
+        """      
         if isinstance(self._structure, Structure):
             return Structure(
                 self._structure.lattice.copy(),
-                self._structure.species.copy(),
+                self._structure.species,
                 self._structure.frac_coords.copy(),
             )
 
         if isinstance(self._structure, Molecule):
             return Molecule(
-                self._structure.species.copy(),
+                self._structure.species,
                 self._structure.cart_coords.copy(),
             )
 
-        return None
+        raise MissingGeometryError(
+            f"Geometry is not available on this "
+            f"{self.__class__.__name__} instance."
+        )
 
     @geometry.setter
     def geometry(self, object: Structure | Molecule | None):
@@ -136,12 +163,12 @@ class ChemicalEntity:
         self._structure = object
 
     @property
-    def valence_electrons(self) -> dict[str, float] | None:
+    def valence_electrons(self) -> dict[str, float]:
         """
         Returns the valence electrons of each element in the chemical entity, 
         if available.
         """
-        return self._valence_electrons.copy() if self._valence_electrons else None
+        return self._valence_electrons.copy()
 
     @valence_electrons.setter
     def valence_electrons(self, value: dict[str, float] | None):
@@ -172,6 +199,15 @@ class ChemicalEntity:
                 f"holds a non-periodic '{type(geometry).__name__}' object."
             )
         return geometry
+
+    def _require_site_property(self, property_name: str) -> np.ndarray:
+        geometry = self._require_geometry
+        if property_name not in geometry.site_properties:
+            raise MissingSitePropertyError(
+                f"Site property '{property_name}' is not available on this "
+                f"{self.__class__.__name__} instance."
+            )
+        return np.array(geometry.site_properties[property_name], dtype=float)
     
     @property
     def fractional_coords(self) -> np.ndarray:
@@ -189,12 +225,22 @@ class ChemicalEntity:
         """
         return self._require_geometry.cart_coords.copy()
 
-    @property
+    @cached_property
+    def symbols(self) -> tuple[str]:
+        """Returns the chemical symbols of the atoms in the structure, if available."""
+        return self._require_geometry.symbol_set
+
+    @cached_property
+    def atomic_symbols(self) -> list[str]:
+        """Returns the atomic symbols of the chemical entity, if available."""
+        return [site.species_string for site in self._require_geometry]
+
+    @cached_property
     def composition(self) -> dict[str, float]:
         """Returns the composition of the chemical entity, if available."""
         return self._require_geometry.composition.get_el_amt_dict()
 
-    @property
+    @cached_property
     def atomic_fraction(self) -> dict[str, float]:
         """Returns the atomic fraction of each element in the chemical entity, if available."""
         comp = self.composition
@@ -202,141 +248,123 @@ class ChemicalEntity:
         return {el: amt / total for el, amt in comp.items()}
     
     # Here we define property getters for Bader analysis attributes.
-    def _require_site_property(self, property_name: str) -> np.ndarray:
-        geometry = self._require_geometry
-        if property_name not in geometry.site_properties:
-            raise MissingSitePropertyError(
-                f"Site property '{property_name}' is not available on this "
-                f"{self.__class__.__name__} instance."
-            )
-        return np.array(geometry.site_properties[property_name], dtype=float)
-
     @property
     def bader_charges(self) -> np.ndarray:
         """Returns the Bader charges as a numpy array, if available."""
         return self._require_site_property("bader_charge")
 
-    @property
+    @cached_property
     def bader_net_charges(self) -> np.ndarray:
-        """
-        Calculates the net Bader charges based on the provided valence electron counts.
+        """Returns the net Bader charges as a numpy array, if available."""
+        return calculate_bader_net_charges(
+            species_list=self.atomic_symbols,
+            bader_charges=self.bader_charges,
+            valence_electrons=self.valence_electrons
+        )
 
-        Args:
-            valence_electrons (dict[str, int], optional): A dictionary mapping element symbols
-                to their respective valence electron counts. If not provided, the method
-                will use the `valence_electrons` attribute of the instance.
-
-        Returns:
-            float: The net Bader charge of the system.
-            None: If the calculation cannot be performed.
-        """
-        if "bader_net_charges" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_net_charges"], dtype=float)
-
-        bader_charges = self._require_site_property("bader_charge")
-        valence_electrons = self.valence_electrons
-        try:
-            return calculate_bader_net_charges(
-                geometry=self._structure,
-                bader_charges=bader_charges,
-                valence_electrons=valence_electrons
-            )
-        except (
-            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
-            ValueError, TypeError
-        ) as e:
-            logging.warning(f"Failed to calculate net Bader charges: {e}")
-            return None
-
-    def sum_bader_charges(self, valence_electrons: dict[str, int] = None) -> dict[str, float] | None:
-        """
-        Sums the net Bader charges per species.
-
-        Args:
-            valence_electrons (dict[str, int], optional): A dictionary mapping element symbols
-                to their respective valence electron counts. If not provided, the method
-                will use the `valence_electrons` attribute of the instance.
-
-        Returns:
-            dict[str, float]: Summed net Bader charges grouped by species, 
-                or None if Bader charges are not available.
-        """
-        if self._structure is None:
-            logging.warning(
-                "Net Bader charges are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-
-        bader_charges = self.bader_charges
-        if bader_charges is None:
-            logging.warning(
-                "Net Bader charges are not available since Bader charges are not set."
-            )
-            return None
-    
-        try:
-            return sum_bader_net_charges(
-                geometry=self._structure,
-                net_bader_charges=self.bader_net_charges(
-                    valence_electrons=valence_electrons 
-                    if valence_electrons is not None else None)
-            ) if self.bader_charges is not None else None
-        except (
-            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
-            ChargeNeutralityError, ValueError, TypeError
-        ) as e:
-            logging.warning(f"Failed to sum Bader charges: {e}")
-            return None
+    @cached_property
+    def sum_bader_charges(self) -> dict[str, float]:
+        """Sums the net Bader charges per species."""
+        return sum_bader_net_charges(
+            species_list=self.atomic_symbols,
+            net_bader_charges=self.bader_net_charges
+        )
 
     @property
-    def bader_magnetic_moments(self) -> np.ndarray | None:
+    def bader_magnetic_moments(self) -> np.ndarray:
         """Returns the Bader magnetic moments as a numpy array, if available."""
-        if self._structure is None:
-            logging.warning(
-                "Bader magnetic moments are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
-            )
-            return None
-        if "bader_magmom" in self._structure.site_properties:
-            return np.array(self._structure.site_properties["bader_magmom"])
-        
-        logging.warning("Bader magnetic moments are not available.")
-        return None
+        return self._require_site_property("bader_magmom")
 
-    @property
-    def sum_bader_magmoms(self) -> dict[str, float] | None:
+    @cached_property
+    def sum_bader_magmoms(self) -> dict[str, float]:
         """Sums the Bader magnetic moments per species."""
-        if self._structure is None:
-            logging.warning(
-                "Bader magnetic moments are not available since the structure is not set. "
-                f"Create a new {self.__class__.__name__} with a structure to access "
-                "the attribute."
+        return sum_bader_magnetic_moments(
+            species_list=self.atomic_symbols,
+            bader_magnetic_moments=self.bader_magnetic_moments,
+            total_magnetic_moment=self.net_magmom
+        )
+
+    # The following methods correspond to energy calculations and related properties
+    def cohesive_energy(
+        self,
+        *atoms: "ChemicalEntity",
+        **named_atoms: "ChemicalEntity | float",
+    ) -> float:
+        """Calculates the cohesive energy from isolated atomic references.
+
+        Atomic references can be passed positionally as single-atom `ChemicalEntity`
+        instances (whose element symbol is inferred automatically) and/or as keyword
+        arguments mapping element symbols to `ChemicalEntity` instances or float energies.
+
+        Args:
+            *atoms: Isolated single-atom `ChemicalEntity` instances.
+            **named_atoms: Keyword arguments mapping atomic symbols (e.g., 'Au', 'O')
+                to either a `ChemicalEntity` instance or its total energy as a float.
+
+        Returns:
+            float: The cohesive energy of the structure in eV.
+
+        Raises:
+            TypeError: If a positional argument is not a `ChemicalEntity` instance.
+            StoichiometryError: If a positional `ChemicalEntity` does not represent a
+                single isolated atom (1 species and 1 atom).
+            ValueError: If duplicate references are provided for the same species.
+            MissingReferenceError: If atomic references are missing for any species
+                present in the structure.
+        """
+        atomic_energies = {}
+
+        # 1. Process positional atomic references
+        for atom in atoms:
+            if not isinstance(atom, ChemicalEntity):
+                raise TypeError(
+                    "Positional arguments must be ChemicalEntity instances. "
+                    "Pass numeric energies using keywords (e.g., Au=-3.2)."
+                )
+
+            comp = atom.composition
+            if len(comp) != 1 or next(iter(comp.values())) != 1:
+                raise StoichiometryError(
+                    "Positional atomic references must represent a single isolated atom "
+                    f"(1 species, 1 atom), got composition: {comp}."
+                )
+
+            symbol = next(iter(comp.keys()))
+            if symbol in atomic_energies:
+                raise ValueError(f"Duplicate atomic reference provided for '{symbol}'.")
+
+            atomic_energies[symbol] = atom.total_energy
+
+        # 2. To process explicit keyword atomic references
+        for symbol, ref in named_atoms.items():
+            if symbol in atomic_energies:
+                raise ValueError(f"Duplicate atomic reference provided for '{symbol}'.")
+
+            atomic_energies[symbol] = (
+                ref.total_energy if isinstance(ref, ChemicalEntity) else float(ref)
             )
-            return None
 
-        bader_magmoms = self.bader_magnetic_moments
-        if bader_magmoms is None:
-            logging.warning(
-                "Bader magnetic moments are not available since Bader magnetic moments are not set."
+        # 3. To check that all species in the structure are covered
+        required_species = set(self.symbols)
+        missing_species = required_species - atomic_energies.keys()
+
+        if missing_species:
+            raise MissingReferenceError(
+                "Atomic energies must be provided for all species in the structure. "
+                f"Missing species: {sorted(missing_species)}"
             )
-            return None
 
-        try:
-            return sum_bader_magnetic_moments(
-                geometry=self._structure,
-                bader_magnetic_moments=self.bader_magnetic_moments,
-                total_magnetic_moment=self.net_magmom,
-            ) if self.bader_magnetic_moments is not None else None
-        except (
-            SizeMismatchError, InvalidValenceValueError, MissingValenceElementError, 
-            MagneticMomentMismatchError, ValueError, TypeError
-        ) as e:
-            logging.warning(f"Failed to sum Bader magnetic moments: {e}")
-            return None
+        filtered_energies = {
+            symbol: atomic_energies[symbol] for symbol in required_species
+        }
 
+        return calculate_cohesive_energy(
+            total_energy=self.total_energy,
+            atomic_energies=filtered_energies,
+            atomic_counts=self.composition,
+        )
+
+    # Factory methods for constructing instances from external data sources
     @classmethod
     def from_vasp(cls, directory: str | Path, name: str = None):
         """

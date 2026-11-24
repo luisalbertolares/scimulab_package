@@ -1,4 +1,9 @@
 # Custom exceptions for ChemicalEntity class in scimulib.
+class MissingDataError(ValueError):
+    """Raised when accessing an attribute that was not provided at initialization."""
+    pass
+
+
 class MissingGeometryError(ValueError):
     """Raised when a geometric property is accessed without an assigned geometry."""
     pass

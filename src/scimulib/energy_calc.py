@@ -8,8 +8,8 @@ from scimulib.exceptions import EnergyCalculationError, StoichiometryError, Miss
 
 def _calculate_energy_difference(
     final_energy: float,
-    reference_energies: Mapping[str, float],
-    coefficients: Mapping[str, float],
+    reference_energies: dict[str, float],
+    coefficients: dict[str, float],
 ) -> float:
     """Computes a generic relative energy against a linear combination of references.
 
@@ -19,9 +19,9 @@ def _calculate_energy_difference(
     Args:
         final_energy: Total energy of the final state (e.g., cluster, bulk, or
             adsorbed complex) in consistent energy units (typically eV).
-        reference_energies: Mapping of component/species identifiers to their
+        reference_energies: Dictionary of component/species identifiers to their
             reference energies.
-        coefficients: Mapping of component/species identifiers to their weighting
+        coefficients: Dictionary of component/species identifiers to their weighting
             or stoichiometric coefficients in the initial state.
 
     Returns:
@@ -71,8 +71,8 @@ def _calculate_energy_difference(
 
 def _calculate_weighted_energy(
     system_energy: float,
-    reference_energies: Mapping[str, float],
-    atomic_fractions: Mapping[str, float],
+    reference_energies: dict[str, float],
+    atomic_fractions: dict[str, float],
 ) -> float:
     """Calculates relative energy using fractional composition weights.
 
@@ -84,9 +84,9 @@ def _calculate_weighted_energy(
 
     Args:
         system_energy: Energy of the final state of the system.
-        reference_energies: Mapping of element symbols to their reference
+        reference_energies: Dictionary of element symbols to their reference
             energies.
-        atomic_fractions: Mapping of element symbols to their atomic fractions
+        atomic_fractions: Dictionary of element symbols to their atomic fractions
             in the system. Values must be non-negative and sum to 1.0 within a
             tolerance of 1e-4.
 
@@ -122,8 +122,8 @@ def _calculate_weighted_energy(
 
 def _calculate_interaction_energy(
     system_energy: float,
-    reference_energies: Mapping[str, float],
-    stoichiometry: Mapping[str, int | float] | None = None,
+    reference_energies: dict[str, float],
+    stoichiometry: dict[str, int | float] | None = None,
 ) -> float:
     """Calculates interaction, adsorption, or binding energy from reference subsystems.
 
@@ -134,9 +134,9 @@ def _calculate_interaction_energy(
 
     Args:
         system_energy: Total energy of the combined final system.
-        reference_energies: Mapping of subsystem or reference species names to
+        reference_energies: Dictionary of subsystem or reference species names to
             the total energies of their isolated states.
-        stoichiometry: Optional mapping of reference names to positive
+        stoichiometry: Optional dictionary of reference names to positive
             stoichiometric coefficients (integers or floats) in the final
             system. If `None`, a stoichiometric coefficient of 1.0 is assumed
             for every entry in `reference_energies`.
@@ -382,7 +382,7 @@ def calculate_strain_mixing_energy(
 def calculate_adsorption_energy(
     total_energy: float, 
     clean_surface_energy: float, 
-    adsorbate_energies: float | dict[str, float]
+    *adsorbate_energies: float
 ) -> float:
     """
     Calculates the adsorption energy of an adsorbate on a surface.
@@ -407,14 +407,9 @@ def calculate_adsorption_energy(
     Note:
         Formula: E_ads = E_total - E_clean_surface - sum(E_adsorbate_i)
     """
-    if isinstance(adsorbate_energies, dict):
-        reference_energies = { "clean_surface": clean_surface_energy, **adsorbate_energies }
-    elif isinstance(adsorbate_energies, float):
-        reference_energies = { "clean_surface": clean_surface_energy, "adsorbate": adsorbate_energies }
-    else:
-        raise TypeError(
-            "Adsorbate energies must be provided as a float or a dictionary."
-        )
+    reference_energies = { "clean_surface": clean_surface_energy }
+    for i, energy in enumerate(adsorbate_energies):
+        reference_energies[f"adsorbate_{i}"] = energy
 
     return _calculate_interaction_energy(
         total_energy, 

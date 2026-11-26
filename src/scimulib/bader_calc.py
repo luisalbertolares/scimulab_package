@@ -6,9 +6,21 @@ from scimulib.exceptions import (
 )
 
 
+def _validate_tolerance(atol: float) -> None:
+    if (
+        isinstance(atol, bool)
+        or not isinstance(atol, (int, float))
+        or not np.isfinite(atol)
+        or atol < 0
+    ):
+        raise ValueError(
+            f"Absolute tolerance must be finite and non-negative, got {atol!r}."
+        )
+
+
 def calculate_bader_net_charges(
-    species_list: np.ndarray | list[str] | tuple[str], 
-    bader_charges: np.ndarray | list[float] | tuple[float], 
+    species_list: np.ndarray | list[str] | tuple[str, ...],
+    bader_charges: np.ndarray | list[float] | tuple[float, ...],
     valence_electrons: dict[str, float]
 ) -> np.ndarray:
     """
@@ -38,7 +50,7 @@ def calculate_bader_net_charges(
         SizeMismatchError: If the length of `species_list` does not match the 
             length of `bader_charges`.
         InvalidValenceValueError: If any value in `valence_electrons` is not a
-            finite float (e.g., NaN, inf, or a non-float type).
+            finite, non-negative real number.
         MissingValenceElementError: If any element present in `species_list` is
             missing from `valence_electrons`.
     """
@@ -67,9 +79,14 @@ def calculate_bader_net_charges(
         )
 
     for element, value in valence_electrons.items():
-        if not isinstance(value, (float, int)) or not np.isfinite(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (float, int))
+            or not np.isfinite(value)
+            or value < 0
+        ):
             raise InvalidValenceValueError(
-                f"Valence value for '{element}' ({value!r}) is not a valid finite float."
+                f"Valence value for '{element}' ({value!r}) must be finite and non-negative."
             )
 
     missing_elements = set(species_list) - set(valence_electrons.keys())
@@ -86,10 +103,10 @@ def calculate_bader_net_charges(
 
 
 def _sum_bader_property_by_species(
-    species_list: np.ndarray | list[str] | tuple[str], 
-    bader_property: np.ndarray | list[float] | tuple[float],
+    species_list: np.ndarray | list[str] | tuple[str, ...],
+    bader_property: np.ndarray | list[float] | tuple[float, ...],
     bader_property_name: str = "Bader property",
-    type: np.ndarray | list[str] | tuple[str] | None = None
+    type: np.ndarray | list[str] | tuple[str, ...] | None = None
 ) -> dict[str, float] | dict[str, dict[str, float]]:
     """
     Sum a Bader atomic property for each species present in a Pymatgen geometry.
@@ -172,11 +189,11 @@ def _sum_bader_property_by_species(
 
 
 def sum_bader_net_charges(
-    species_list: np.ndarray | list[str] | tuple[str], 
-    net_bader_charges: np.ndarray | list[float] | tuple[float],
-    type: np.ndarray | list[str] | tuple[str] | None = None,
-    atol: float = 1e-3
-):
+    species_list: np.ndarray | list[str] | tuple[str, ...],
+    net_bader_charges: np.ndarray | list[float] | tuple[float, ...],
+    type: np.ndarray | list[str] | tuple[str, ...] | None = None,
+    atol: float = 1e-3,
+) -> dict[str, float] | dict[str, dict[str, float]]:
     """
     Sum net Bader charges per species and verify system charge neutrality.
 
@@ -207,15 +224,17 @@ def sum_bader_net_charges(
         ChargeNeutralityError: If the sum of `net_bader_charges` deviates from
             zero by more than `atol`.
     """
+    _validate_tolerance(atol)
+    charge_values = np.asarray(net_bader_charges, dtype=float)
     charges_by_species = _sum_bader_property_by_species(
         species_list=species_list, 
-        bader_property=net_bader_charges, 
+        bader_property=charge_values,
         bader_property_name="net Bader charges", 
         type=type
     )
-    total_charge = float(np.sum(net_bader_charges))
+    total_charge = float(np.sum(charge_values))
 
-    if not np.isclose(total_charge, 0.0, atol=atol):
+    if not np.isclose(total_charge, 0.0, rtol=0.0, atol=atol):
         raise ChargeNeutralityError(
             f"System is not charge-neutral: sum of net Bader charges is "
             f"{total_charge:.6f} (expected 0.0 within atol={atol})."
@@ -225,12 +244,12 @@ def sum_bader_net_charges(
 
 
 def sum_bader_magnetic_moments(
-    species_list: np.ndarray | list[str] | tuple[str], 
-    bader_magnetic_moments: np.ndarray | list[float] | tuple[float],
-    total_magnetic_moment: float, 
-    type: np.ndarray | list[str] | tuple[str] | None = None,
-    atol: float = 1e-3
-):
+    species_list: np.ndarray | list[str] | tuple[str, ...],
+    bader_magnetic_moments: np.ndarray | list[float] | tuple[float, ...],
+    total_magnetic_moment: float,
+    type: np.ndarray | list[str] | tuple[str, ...] | None = None,
+    atol: float = 1e-3,
+) -> dict[str, float] | dict[str, dict[str, float]]:
     """Sum Bader magnetic moments per species and verify against the total magnetic moment.
 
     Wraps `sum_bader_property_by_species` and validates that the sum of atomic
@@ -251,8 +270,8 @@ def sum_bader_magnetic_moments(
             summed moments to `total_magnetic_moment`. Defaults to 1e-3.
 
     Returns:
-        dict: Summed Bader magnetic moments grouped by species (or by component
-        and species if 'component' is present in `geometry.site_properties`).
+        dict: Summed Bader magnetic moments grouped by species, or by type and species
+            when type labels are provided.
 
     Raises:
         ValueError: If `bader_magnetic_moments`, `species_list`, or `type` 
@@ -262,16 +281,25 @@ def sum_bader_magnetic_moments(
             differ in length.
         MagneticMomentMismatchError: If the sum of `bader_magnetic_moments`
             deviates from `total_magnetic_moment` by more than `atol`.
+        ValueError: If `atol` is negative or non-finite, or if the expected
+            total magnetic moment is non-finite.
     """
+    _validate_tolerance(atol)
+    moment_values = np.asarray(bader_magnetic_moments, dtype=float)
+    if not np.isfinite(total_magnetic_moment):
+        raise ValueError(
+            f"Total magnetic moment must be finite, got {total_magnetic_moment!r}."
+        )
+
     magmoms_by_species = _sum_bader_property_by_species(
         species_list=species_list, 
-        bader_property=bader_magnetic_moments, 
+        bader_property=moment_values,
         bader_property_name="Bader magnetic moments", 
         type=type
     )
-    calculated_total = float(np.sum(bader_magnetic_moments))
+    calculated_total = float(np.sum(moment_values))
 
-    if not np.isclose(calculated_total, total_magnetic_moment, atol=atol):
+    if not np.isclose(calculated_total, total_magnetic_moment, rtol=0.0, atol=atol):
         raise MagneticMomentMismatchError(
             f"Magnetic moment mismatch: sum of Bader magnetic moments is "
             f"{calculated_total:.6f}, expected {total_magnetic_moment:.6f} "

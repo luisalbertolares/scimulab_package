@@ -1,7 +1,5 @@
-from collections.abc import Mapping
-
 import math
-import numpy as np
+from collections.abc import Mapping
 
 from scimulib.exceptions import EnergyCalculationError, StoichiometryError, MissingReferenceError
 
@@ -32,8 +30,8 @@ def _calculate_energy_difference(
             non-finite (NaN or Inf).
         MissingReferenceError: If `reference_energies` is empty or any key in 
             `coefficients` is missing from `reference_energies`.
-        EnergyCalculationError: If `final_energy` or any used reference energy
-            is non-finite (NaN or Inf).
+        EnergyCalculationError: If `final_energy`, any used reference energy, or
+            the calculated energy difference is non-finite (NaN or Inf).
     """
     if not reference_energies:
         raise MissingReferenceError(
@@ -64,9 +62,22 @@ def _calculate_energy_difference(
             raise EnergyCalculationError(
                 f"Reference energy for '{key}' must be finite, got {ref_energy}."
             )
-        terms.append(coeff * ref_energy)
+        term = coeff * ref_energy
+        if not math.isfinite(term):
+            raise EnergyCalculationError(
+                f"Weighted reference energy for '{key}' is not finite."
+            )
+        terms.append(term)
 
-    return final_energy - math.fsum(terms)
+    try:
+        reference_total = math.fsum(terms)
+    except OverflowError as error:
+        raise EnergyCalculationError("Weighted reference energy sum is not finite.") from error
+
+    energy_difference = final_energy - reference_total
+    if not math.isfinite(energy_difference):
+        raise EnergyCalculationError("Calculated energy difference is not finite.")
+    return energy_difference
 
 
 def _calculate_weighted_energy(
@@ -110,7 +121,10 @@ def _calculate_weighted_energy(
                 f"finite, got {fraction}."
             )
 
-    total_fraction = math.fsum(atomic_fractions.values())
+    try:
+        total_fraction = math.fsum(atomic_fractions.values())
+    except OverflowError as error:
+        raise StoichiometryError("The sum of atomic fractions is not finite.") from error
     if not math.isclose(total_fraction, 1.0, rel_tol=0.0, abs_tol=1e-4):
         raise StoichiometryError(
             f"Atomic fractions must sum to 1.0. Current sum: {total_fraction:.4f}. "
@@ -172,9 +186,9 @@ def _calculate_interaction_energy(
 
 
 def calculate_cohesive_energy(
-    total_energy: float, 
-    atomic_energies: dict[str, float], 
-    atomic_counts: dict[str, int]
+    total_energy: float,
+    atomic_energies: dict[str, float],
+    atomic_counts: dict[str, int | float],
 ) -> float:
     """
     Calculates the cohesive energy per atom for a multi-atomic system.
@@ -182,14 +196,15 @@ def calculate_cohesive_energy(
     Args:
         total_energy (float): The total energy of the system.
         atomic_energies (dict[str, float]): Reference energies for each atomic species.
-        atomic_counts (dict[str, int]): Number of atoms for each species in the system.
+        atomic_counts (dict[str, int | float]): Integer-valued atom counts for each
+            species in the system.
 
     Returns:
         float: The cohesive energy per atom (eV/atom).
 
     Raises:
-        StoichiometryError: If any stoichiometric coefficient is non-finite or less 
-            than or equal to zero.
+        StoichiometryError: If `atomic_counts` is empty or any count is not a
+            positive integer value.
         MissingReferenceError: If any atomic species in `atomic_counts` is missing 
             from `atomic_energies`.
         EnergyCalculationError: If any input energy is non-finite.
@@ -197,16 +212,33 @@ def calculate_cohesive_energy(
     Note:
         Formula: E_coh = (sum(x_i * E_atom_i) - E_total) / total_atoms
     """
+    if not atomic_counts:
+        raise StoichiometryError("Atomic counts dictionary cannot be empty.")
+    for species, count in atomic_counts.items():
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, (int, float))
+            or count <= 0
+            or (isinstance(count, float) and (
+                not math.isfinite(count) or not count.is_integer()
+            ))
+        ):
+            raise StoichiometryError(
+                f"Atomic count for '{species}' must be a positive integer value, "
+                f"got {count}."
+            )
+
     total_atoms = sum(atomic_counts.values())
     return - _calculate_interaction_energy(
         system_energy=total_energy,
         reference_energies=atomic_energies,
-        stoichiometry=atomic_counts
+        stoichiometry=atomic_counts,
     ) / total_atoms
 
+
 def calculate_ideal_cohesive_energy(
-    mono_cohesive_energies: dict[str, float], 
-    atomic_fractions: dict[str, float]
+    mono_cohesive_energies: dict[str, float],
+    atomic_fractions: dict[str, float],
 ) -> float:
     """
     Calculates the ideal cohesive energy (without mixing interaction) for a 
@@ -235,7 +267,11 @@ def calculate_ideal_cohesive_energy(
     Note:
         Formula: E_ideal_coh = sum(x_i * E_coh_i)
     """
-    neg_coh_energies = {subsys: -energy for subsys, energy in mono_cohesive_energies.items()}
+    neg_coh_energies = {
+        species: -mono_cohesive_energies[species]
+        for species in atomic_fractions
+        if species in mono_cohesive_energies
+    }
     return _calculate_weighted_energy(0.0, neg_coh_energies, atomic_fractions)
 
 
@@ -251,24 +287,30 @@ def calculate_mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> 
         float: The cohesive energy of mixing (eV/atom).
 
     Raises:
-        StoichiometryError: If the total number of atoms is zero or negative.
+        StoichiometryError: If the total number of atoms is not a positive integer.
+        EnergyCalculationError: If `mixing_energy` is non-finite.
 
     Note:
         Formula: E_mix_coh = - mixing_energy / total_atoms
     """
-    if total_atoms <= 0:
+    if isinstance(total_atoms, bool) or not isinstance(total_atoms, int) or total_atoms <= 0:
         raise StoichiometryError(
-            "The total number of atoms must be greater than zero. "
+            "The total number of atoms must be a positive integer. "
             f"Current value: {total_atoms}"
         )
-    
+
+    if not math.isfinite(mixing_energy):
+        raise EnergyCalculationError(
+            f"Mixing energy must be finite, got {mixing_energy}."
+        )
+
     return -(mixing_energy / total_atoms)
 
 
 def calculate_mixing_energy(
-    alloy_energy: float, 
-    mono_energies: dict[str, float], 
-    atomic_fractions: dict[str, float]
+    alloy_energy: float,
+    mono_energies: dict[str, float],
+    atomic_fractions: dict[str, float],
 ) -> float:
     """
     Calculates the total mixing energy for a multi-metallic cluster.
@@ -286,7 +328,7 @@ def calculate_mixing_energy(
         float: The mixing energy in the same units as the inputs (typically eV).
 
     Raises:
-        StoichiometryError: If the atomic fractions do not sum to 1.
+        StoichiometryError: If the atomic fractions are invalid or do not sum to 1.
         MissingReferenceError: If a required reference energy for a monometallic 
             component is missing.
         EnergyCalculationError: If any input energy is non-finite.
@@ -298,9 +340,9 @@ def calculate_mixing_energy(
 
 
 def calculate_interact_mixing_energy(
-    alloy_energy: float, 
-    frozen_energies: dict[str, float], 
-    atomic_fractions: dict[str, float]
+    alloy_energy: float,
+    frozen_energies: dict[str, float],
+    atomic_fractions: dict[str, float],
 ) -> float:
     """
     Calculates the interaction contribution to the mixing energy.
@@ -331,9 +373,9 @@ def calculate_interact_mixing_energy(
 
 
 def calculate_strain_mixing_energy(
-    frozen_energies: dict[str, float], 
-    relaxed_energies: dict[str, float], 
-    atomic_fractions: dict[str, float]
+    frozen_energies: dict[str, float],
+    relaxed_energies: dict[str, float],
+    atomic_fractions: dict[str, float],
 ) -> float:
     """
     Calculates the strain contribution to the mixing energy in a multi-metallic cluster.
@@ -363,26 +405,26 @@ def calculate_strain_mixing_energy(
         Formula: E_strain = sum(x_i * (E_frozen_i - E_relaxed_i))
         By definition, E_mix = E_interact + E_strain.
     """
-    # Validate missing references across both dictionaries
     elements = set(atomic_fractions.keys())
-    if (not elements.issubset(frozen_energies.keys()) 
-        or not elements.issubset(relaxed_energies.keys())
-    ):
+    missing_references = elements - frozen_energies.keys() | elements - relaxed_energies.keys()
+    if missing_references:
         raise MissingReferenceError(
-            "Missing frozen or relaxed reference energies for one or more elements."
+            "Missing frozen or relaxed reference energies for: "
+            f"{sorted(missing_references)}.",
+            missing_species=missing_references,
         )
 
-    neg_relaxed_energies = {subsys: -energy for subsys, energy in relaxed_energies.items()}
-    strain_energy_frozen = _calculate_weighted_energy(0.0, frozen_energies, atomic_fractions)
-    strain_energy_relaxed = _calculate_weighted_energy(0.0, neg_relaxed_energies, atomic_fractions)
-    
-    return strain_energy_frozen + strain_energy_relaxed
+    frozen_minus_relaxed = {
+        species: frozen_energies[species] - relaxed_energies[species]
+        for species in elements
+    }
+    return _calculate_weighted_energy(0.0, frozen_minus_relaxed, atomic_fractions)
 
 
 def calculate_adsorption_energy(
-    total_energy: float, 
-    adsorbent: float, 
-    *adsorbate_energies: float
+    total_energy: float,
+    adsorbent: float,
+    *adsorbate_energies: float | Mapping[str, float],
 ) -> float:
     """
     Calculates the adsorption energy of an adsorbate on a surface.
@@ -390,26 +432,27 @@ def calculate_adsorption_energy(
     Args:
         total_energy (float): Total energy of the adsorbate-surface system.
         adsorbent (float): Energy of the clean surface.
-        adsorbate_energies (float | dict[str, float]): Energy of the adsorbate(s). 
-            Can be a single float or a dictionary of adsorbate energies.
+        adsorbate_energies (float | Mapping[str, float]): One or more adsorbate
+            energies, passed as positional floats or mappings of names to energies.
 
     Returns:
         float: Adsorption energy (eV).
 
     Raises:
-        TypeError: If the adsorbate energies are not provided as a float or a dictionary.
-        StoichiometryError: If the adsorbate nor clean surface energies are 
-            provided correctly.
-        MissingReferenceError: If a required reference energy for the clean 
-            surface or adsorbate is missing.
+        TypeError: If an adsorbate energy is not a float or a mapping.
+        StoichiometryError: If a required reference subsystem is not provided.
         EnergyCalculationError: If any input energy is non-finite.
         
     Note:
         Formula: E_ads = E_total - E_adsorbent - sum(E_adsorbate_i)
     """
-    reference_energies = { "adsorbent": adsorbent }
-    for i, energy in enumerate(adsorbate_energies):
-        reference_energies[f"adsorbate_{i}"] = energy
+    reference_energies = {"adsorbent": adsorbent}
+    index = 0
+    for adsorbate in adsorbate_energies:
+        energies = adsorbate.values() if isinstance(adsorbate, Mapping) else (adsorbate,)
+        for energy in energies:
+            reference_energies[f"adsorbate_{index}"] = energy
+            index += 1
 
     return _calculate_interaction_energy(
         total_energy, 
@@ -444,8 +487,15 @@ def calculate_vacancy_formation_energy(
     Note:
         Formula: E_vac = E_defective - E_pristine + num_vacancies * mu_defective_site
     """
+    if (
+        isinstance(num_vacancies, bool)
+        or not isinstance(num_vacancies, int)
+        or num_vacancies <= 0
+    ):
+        raise StoichiometryError("The number of vacancies must be a positive integer.")
+
     return _calculate_interaction_energy(
         defective_energy,
-        { "pristine_system": pristine_energy, "defective_site": -1 * defective_site_energy },
-        { "pristine_system": 1, "defective_site": num_vacancies }
+        {"pristine_system": pristine_energy, "defective_site": -1 * defective_site_energy},
+        {"pristine_system": 1, "defective_site": num_vacancies},
     )

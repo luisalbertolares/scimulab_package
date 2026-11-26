@@ -85,6 +85,10 @@ def test_vasp_parser_magmom_outcar():
     vasp_parser._oszicar_path = None
     assert isclose(vasp_parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
 
+def test_vasp_parser_valence_electrons_outcar():
+    vasp_parser = VaspParser(DATA_DIRECTORY)
+    assert vasp_parser.get_valence_electrons() == {"Au": 11.0, "Co": 9.0}
+
 def test_vasp_parser_structure_poscar():
     vasp_parser = VaspParser(DATA_DIRECTORY)
     vasp_parser._vasprun_path = None

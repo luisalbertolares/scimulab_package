@@ -482,12 +482,25 @@ class VaspParser:
                         break
 
                     if "VRHFIN" in line:
-                        elem = line.split("=")[1].split(":")[0].strip()
+                        _, separator, value = line.partition("=")
+                        if not separator:
+                            raise ValueError("VRHFIN entry has no '=' separator.")
+                        elem = value.split(":", 1)[0].strip()
+                        if not elem:
+                            raise ValueError("VRHFIN entry has no element symbol.")
                         species_names.append(elem)
 
-                    elif "ZVAL" in line and "=" in line:
-                        parts = line.split("=")[1].split()
-                        zval_values = [float(x) for x in parts]
+                    if "ZVAL" in line:
+                        _, _, zval_text = line.partition("ZVAL")
+                        _, separator, value = zval_text.partition("=")
+                        if not separator or not value.split():
+                            raise ValueError("ZVAL entry has no numeric value.")
+                        zval = float(value.split()[0])
+                        if not np.isfinite(zval) or zval < 0:
+                            raise ValueError(f"Invalid ZVAL value: {zval!r}.")
+                        zval_values.append(zval)
+
+                    if "ions per type" in line:
                         break
         except (OSError, IndexError, ValueError) as e:
             raise OutcarError(
@@ -804,13 +817,16 @@ class VaspParser:
             
         try:
             return Structure.from_file(self._poscar_path)
-        except Exception:
-            pass
+        except (OSError, ValueError, IndexError, TypeError) as e:
+            logging.warning(
+                f"POSCAR failed to provide geometry "
+                f"({type(e).__name__} - {e}). Trying CONTCAR."
+            )
         try:
             return Structure.from_file(self._contcar_path)
-        except Exception as e:
+        except (OSError, ValueError, IndexError, TypeError) as e:
             logging.warning(
-                f"POSCAR/CONTCAR failed to provide geometry "
+                f"CONTCAR failed to provide geometry "
                 f"({type(e).__name__} - {e}). Trying OUTCAR."
             )
 
@@ -823,7 +839,7 @@ class VaspParser:
             f"Unable to extract geometry from any VASP output files in: {self._directory}."
         )
 
-    def get_valence_electrons(self) -> dict[str, int]:
+    def get_valence_electrons(self) -> dict[str, float]:
         """
         Extracts the valence electrons for each atom from the VASP output files.
 
@@ -831,7 +847,7 @@ class VaspParser:
         If that fails, it tries to extract them from the POTCAR file.
 
         Returns:
-            dict[str, int]: A dictionary mapping element symbols to their valence 
+            dict[str, float]: A dictionary mapping element symbols to their valence
                 electron counts.
 
         Raises:
@@ -919,7 +935,8 @@ class BaderParser:
 
         Raises:
             TypeError: If the ACF file path is not a string or Path.
-            ValueError: If the column index is negative or expected atoms is non-positive.
+            ValueError: If the column index or expected atom count is not a valid
+                integer in its allowed range.
             FileNotFoundError: If the ACF file cannot be found at the specified 
                 path or is invalid.
             AcfError: If the file is malformed or data extraction fails.
@@ -927,11 +944,19 @@ class BaderParser:
         if not isinstance(acf_path, (str, Path)):
             raise TypeError(f"ACF file path '{acf_path}' is not a valid string or Path.")
 
-        if column_index < 0:
-            raise ValueError(f"Column index must be non-negative, got {column_index}.")
+        if isinstance(column_index, bool) or not isinstance(column_index, int) or column_index < 0:
+            raise ValueError(
+                f"Column index must be a non-negative integer, got {column_index!r}."
+            )
 
-        if expected_atoms is not None and expected_atoms <= 0:
-            raise ValueError(f"Expected atoms must be positive, got {expected_atoms}.")
+        if expected_atoms is not None and (
+            isinstance(expected_atoms, bool)
+            or not isinstance(expected_atoms, int)
+            or expected_atoms <= 0
+        ):
+            raise ValueError(
+                f"Expected atoms must be a positive integer, got {expected_atoms!r}."
+            )
         
         acf_path = Path(acf_path)
 
@@ -951,11 +976,19 @@ class BaderParser:
         for i, line in enumerate(lines[2:-4], start=3):
             parts = line.split()
             try:
-                extracted_values.append(float(parts[column_index]))
+                value = float(parts[column_index])
             except IndexError as e:
                 raise AcfError(f"Line {i} lacks sufficient columns in {acf_path.name}.") from e
             except ValueError as e:
                 raise AcfError(f"Failed to parse numeric value at line {i} in {acf_path.name}.") from e
+            if not np.isfinite(value):
+                raise AcfError(
+                    f"Non-finite numeric value at line {i} in {acf_path.name}."
+                )
+            extracted_values.append(value)
+
+        if not extracted_values:
+            raise AcfError(f"No atomic data rows found in {acf_path.name}.")
             
         if expected_atoms is not None and len(extracted_values) != expected_atoms:
             raise AcfError(

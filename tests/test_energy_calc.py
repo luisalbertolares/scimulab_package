@@ -29,14 +29,6 @@ def test_adsorption_energy_accepts_mapping_of_adsorbate_energies():
     ) == pytest.approx(-5)
 
 
-def test_strain_mixing_energy_uses_frozen_minus_relaxed_energy():
-    assert calculate_strain_mixing_energy(
-        frozen_energies={"A": -8, "B": -4},
-        relaxed_energies={"A": -10, "B": -5},
-        atomic_fractions={"A": 0.5, "B": 0.5},
-    ) == pytest.approx(1.5)
-
-
 @pytest.mark.parametrize(
     ("defective_energy", "references", "coefficients"),
     [

@@ -166,14 +166,14 @@ def _add_axes_gizmo(
     mode: AxesMode,
     length: float = 2.0,
 ) -> None:
-    """Draws a compact RGB reference axes triad near the lower corner of the structure.
+    """Adds an RGB reference axes overlay fixed to the viewer's lower-right corner.
 
     Args:
-        view: Active `py3Dmol.view` instance where arrows and labels will be added.
+        view: Active `py3Dmol.view` instance.
         target: Periodic `Structure` or non-periodic `Molecule` being rendered.
         mode: Coordinate system for the axes triad. `'cartesian'` draws orthogonal
             (x, y, z) vectors; `'cell'` draws normalized lattice vectors (a, b, c).
-        length: Visual length of each axis arrow in Angstroms. Defaults to 2.0.
+        length: Scale factor for the overlay arrows; 2.0 is the default size.
 
     Raises:
         ValueError: If `mode` is `'cell'` for a non-periodic `Molecule`, or if an
@@ -196,46 +196,83 @@ def _add_axes_gizmo(
             f"Unsupported axes mode '{mode}'. Choose from: 'cartesian', 'cell', or None."
         )
 
-    coords = target.cart_coords
-    origin = coords.min(axis=0) - np.full(3, 1.5) if len(coords) > 0 else np.zeros(3)
-    colors = ("#D9383A", "#2EA043", "#1F6FEB")
+    axes_data = json.dumps(
+        [
+            {"vector": vec.tolist(), "label": label, "color": color}
+            for vec, label, color in zip(
+                vectors, labels, ("#D9383A", "#2EA043", "#1F6FEB"), strict=True
+            )
+        ]
+    )
+    # py3Dmol queues JSON arguments only, so a browser-side callback must be
+    # appended to its initialization script.
+    view.startjs += """
+(function() {
+    const viewer = viewer_UNIQUEID;
+    const host = document.getElementById("3dmolviewer_UNIQUEID");
+    const axes = AXES_DATA;
+    const namespace = "http://www.w3.org/2000/svg";
+    const radius = Math.max(...axes.map(axis => Math.hypot(...axis.vector))) * 14;
+    const size = 2 * (radius + 22);
+    const center = size / 2;
+    const svg = document.createElementNS(namespace, "svg");
+    svg.setAttribute("width", size);
+    svg.setAttribute("height", size);
+    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    svg.setAttribute("aria-label", "Coordinate axes");
+    svg.style.cssText = "position:absolute;right:0;bottom:0;pointer-events:none;overflow:visible";
+    host.appendChild(svg);
 
-    for vec, label, color in zip(vectors, labels, colors, strict=True):
-        end = origin + vec
-        label_pos = origin + vec * 1.2
-
-        view.addArrow(
-            {
-                "start": {
-                    "x": float(origin[0]),
-                    "y": float(origin[1]),
-                    "z": float(origin[2]),
-                },
-                "end": {
-                    "x": float(end[0]),
-                    "y": float(end[1]),
-                    "z": float(end[2]),
-                },
-                "radius": 0.08,
-                "radiusRatio": 2.2,
-                "mid": 0.78,
-                "color": color,
+    function updateAxes(view) {
+        const rotation = new $3Dmol.Quaternion(view[4], view[5], view[6], view[7]);
+        const projected = axes.map(axis => {
+            const vector = new $3Dmol.Vector3(...axis.vector).applyQuaternion(rotation);
+            return {axis, vector};
+        }).sort((a, b) => a.vector.z - b.vector.z);
+        svg.replaceChildren();
+        for (const {axis, vector} of projected) {
+            const x = center + vector.x * 14;
+            const y = center - vector.y * 14;
+            const dx = x - center;
+            const dy = y - center;
+            const distance = Math.hypot(dx, dy);
+            const group = document.createElementNS(namespace, "g");
+            const line = document.createElementNS(namespace, "line");
+            line.setAttribute("x1", center);
+            line.setAttribute("y1", center);
+            line.setAttribute("x2", x);
+            line.setAttribute("y2", y);
+            line.setAttribute("stroke", axis.color);
+            line.setAttribute("stroke-width", "3");
+            group.appendChild(line);
+            if (distance > 1) {
+                const ux = dx / distance;
+                const uy = dy / distance;
+                const head = document.createElementNS(namespace, "polygon");
+                head.setAttribute("points",
+                    `${x},${y} ${x - ux * 7 - uy * 3},${y - uy * 7 + ux * 3} ` +
+                    `${x - ux * 7 + uy * 3},${y - uy * 7 - ux * 3}`);
+                head.setAttribute("fill", axis.color);
+                group.appendChild(head);
             }
-        )
-        view.addLabel(
-            label,
-            {
-                "position": {
-                    "x": float(label_pos[0]),
-                    "y": float(label_pos[1]),
-                    "z": float(label_pos[2]),
-                },
-                "fontColor": color,
-                "fontSize": 13,
-                "bold": True,
-                "showBackground": False,
-            },
-        )
+            const label = document.createElementNS(namespace, "text");
+            const offset = distance > 1 ? 10 / distance : 0;
+            label.setAttribute("x", x + dx * offset);
+            label.setAttribute("y", y + dy * offset);
+            label.setAttribute("fill", axis.color);
+            label.setAttribute("font-size", "13");
+            label.setAttribute("font-weight", "bold");
+            label.setAttribute("text-anchor", "middle");
+            label.setAttribute("dominant-baseline", "central");
+            label.textContent = axis.label;
+            group.appendChild(label);
+            svg.appendChild(group);
+        }
+    }
+    viewer.setViewChangeCallback(updateAxes);
+    updateAxes(viewer.getView());
+})();
+""".replace("AXES_DATA", axes_data)
 
 
 def _add_hover_labels(
@@ -359,10 +396,9 @@ def build_py3dmol_view(
             `Structure` objects. Defaults to True.
         element_colors: Optional mapping from element symbols to CSS or hex color
             strings. Ignored when `property_values` is provided.
-        axes: Reference axes triad to display near the structure corner (`'cartesian'`,
+        axes: Reference axes fixed in the viewer's lower-right corner (`'cartesian'`,
             `'cell'`, or `None` to hide). Defaults to `'cartesian'`.
-        axes_length: Visual length of the reference axes arrows in Angstroms.
-            Defaults to 2.0.
+        axes_length: Scale factor for the overlay arrows. Defaults to 2.0.
         hover_labels: Controls interactive mouseover tooltips on atoms. Pass `True`
             (equivalent to `'symbol_index'`) for symbol and index, `'symbol'` for
             element symbols only, `'index'` for site indices only, or `False` to

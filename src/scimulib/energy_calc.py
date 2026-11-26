@@ -267,7 +267,7 @@ def calculate_mixing_cohesive_energy(mixing_energy: float, total_atoms: int) -> 
 
 def calculate_mixing_energy(
     alloy_energy: float, 
-    relaxed_energies: dict[str, float], 
+    mono_energies: dict[str, float], 
     atomic_fractions: dict[str, float]
 ) -> float:
     """
@@ -278,7 +278,7 @@ def calculate_mixing_energy(
 
     Args:
         alloy_energy (float): Total energy of the relaxed mixed cluster (alloy).
-        relaxed_energies (dict[str, float]): Total energies of the fully relaxed 
+        mono_energies (dict[str, float]): Total energies of the fully relaxed 
             pure monometallic clusters. Example: {'Au': -150.2, 'Co': -180.5}.
         atomic_fractions (dict[str, float]): Atomic fractions of each metal in the cluster.
 
@@ -292,9 +292,9 @@ def calculate_mixing_energy(
         EnergyCalculationError: If any input energy is non-finite.
 
     Note:
-        Formula: E_mix = E_alloy - sum(x_i * E_relaxed_i)
+        Formula: E_mix = E_alloy - sum(x_i * E_mono_i)
     """
-    return _calculate_weighted_energy(alloy_energy, relaxed_energies, atomic_fractions)
+    return _calculate_weighted_energy(alloy_energy, mono_energies, atomic_fractions)
 
 
 def calculate_interact_mixing_energy(
@@ -344,7 +344,7 @@ def calculate_strain_mixing_energy(
 
     Args:
         frozen_energies (dict[str, float]): Energies of the monometallic clusters 
-            with frozen geometries (matching the alloy's structural lattice).
+            with frozen geometries (matching the alloy's structure).
         relaxed_energies (dict[str, float]): Energies of the fully relaxed pure 
             monometallic clusters.
         atomic_fractions (dict[str, float]): Atomic fractions of each metal in the cluster.
@@ -381,7 +381,7 @@ def calculate_strain_mixing_energy(
 
 def calculate_adsorption_energy(
     total_energy: float, 
-    clean_surface_energy: float, 
+    adsorbent: float, 
     *adsorbate_energies: float
 ) -> float:
     """
@@ -389,7 +389,7 @@ def calculate_adsorption_energy(
 
     Args:
         total_energy (float): Total energy of the adsorbate-surface system.
-        clean_surface_energy (float): Energy of the clean surface.
+        adsorbent (float): Energy of the clean surface.
         adsorbate_energies (float | dict[str, float]): Energy of the adsorbate(s). 
             Can be a single float or a dictionary of adsorbate energies.
 
@@ -405,9 +405,9 @@ def calculate_adsorption_energy(
         EnergyCalculationError: If any input energy is non-finite.
         
     Note:
-        Formula: E_ads = E_total - E_clean_surface - sum(E_adsorbate_i)
+        Formula: E_ads = E_total - E_adsorbent - sum(E_adsorbate_i)
     """
-    reference_energies = { "clean_surface": clean_surface_energy }
+    reference_energies = { "adsorbent": adsorbent }
     for i, energy in enumerate(adsorbate_energies):
         reference_energies[f"adsorbate_{i}"] = energy
 

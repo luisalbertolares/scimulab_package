@@ -9,6 +9,10 @@ class MissingGeometryError(ValueError):
     pass
 
 
+class MismatchedGeometryError(ValueError):
+    """Raised when the geometry of a chemical entity does not match the expected reference geometry."""
+    pass
+
 class NonPeriodicGeometryError(TypeError):
     """Raised when a periodic property is accessed on a non-periodic Molecule."""
     pass

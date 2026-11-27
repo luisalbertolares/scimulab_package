@@ -358,7 +358,7 @@ class ChemicalEntity:
             raise TypeError("Valence electrons must be a dictionary or None.")
         self._valence_electrons = value.copy() if value is not None else {}
         if self._bader_net_charges_calculated and self._structure is not None:
-            self._structure.remove_site_property("net_bader_charge")
+            self._structure.remove_site_property("bader_net_charge")
             self._bader_net_charges_calculated = False
 
     @property
@@ -455,10 +455,9 @@ class ChemicalEntity:
             if ignore_species:
                 geom_a = geom_a.copy()
                 geom_b = geom_b.copy()
-                for site in geom_a:
-                    site.species = "X"
-                for site in geom_b:
-                    site.species = "X"
+                for molecule in (geom_a, geom_b):
+                    for site in molecule:
+                        site.species = "H"
             matcher = MoleculeMatcher(tolerance=mol_tol)
             return bool(matcher.fit(geom_a, geom_b))
 
@@ -484,15 +483,15 @@ class ChemicalEntity:
     def bader_net_charges(self) -> np.ndarray:
         """Returns the net Bader charges as a numpy array, if available."""
         geometry = self._require_geometry
-        if "net_bader_charge" in geometry.site_properties:
-            return np.array(geometry.site_properties["net_bader_charge"])
+        if "bader_net_charge" in geometry.site_properties:
+            return np.array(geometry.site_properties["bader_net_charge"])
         
         bader_net_charges = calculate_bader_net_charges(
             species_list=self.atomic_symbols,
             bader_charges=self.bader_charges,
             valence_electrons=self.valence_electrons
         )
-        geometry.add_site_property("net_bader_charge", bader_net_charges)
+        geometry.add_site_property("bader_net_charge", bader_net_charges)
         self._bader_net_charges_calculated = True
         return np.array(bader_net_charges)
 

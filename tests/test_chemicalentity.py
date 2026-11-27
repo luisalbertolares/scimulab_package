@@ -242,6 +242,44 @@ def test_periodic_geometry_comparison_ignores_all_species_without_mutation():
     assert reference.atomic_symbols == ["Au", "Au", "O"]
 
 
+def test_molecular_geometry_comparison_uses_real_species_without_mutation(monkeypatch):
+    class Matcher:
+        def __init__(self, tolerance):
+            pass
+
+        def fit(self, first, second):
+            assert [site.specie.Z for site in first] == [1, 1]
+            assert [site.specie.Z for site in second] == [1, 1]
+            return True
+
+    monkeypatch.setattr("scimulib.scimulib.MoleculeMatcher", Matcher)
+    coords = [[0, 0, 0], [2.5, 0, 0]]
+    alloy = Nanocluster("alloy", geometry=Molecule(["Au", "Co"], coords))
+    reference = Nanocluster("reference", geometry=Molecule(["Au", "Au"], coords))
+
+    assert alloy.has_same_geometry(reference, ignore_species=True)
+    assert alloy.atomic_symbols == ["Au", "Co"]
+    assert reference.atomic_symbols == ["Au", "Au"]
+
+
+def test_frozen_cluster_geometry_comparison_with_openbabel():
+    pytest.importorskip("openbabel")
+    geometry = Molecule(test_structure.species, test_structure.cart_coords)
+    frozen_geometry = Molecule(["Au"] * len(geometry), geometry.cart_coords)
+    frozen = Nanocluster("Au13", -5, geometry=frozen_geometry)
+    alloy = Nanocluster("alloy", -6, geometry=geometry, frozen_references={"Au": frozen})
+
+    assert alloy.frozen_references["Au"] is frozen
+    assert alloy.atomic_symbols == species
+    assert frozen.atomic_symbols == ["Au"] * len(geometry)
+
+    changed_coords = frozen_geometry.cart_coords.copy()
+    changed_coords[0] += [2, 0, 0]
+    changed = Nanocluster("changed", -5, geometry=Molecule(["Au"] * len(geometry), changed_coords))
+    with pytest.raises(MismatchedGeometryError):
+        Nanocluster("alloy", -6, geometry=geometry, frozen_references={"Au": changed})
+
+
 def test_summed_magnetic_moments_follow_updated_total():
     entity = ChemicalEntity(
         "H",

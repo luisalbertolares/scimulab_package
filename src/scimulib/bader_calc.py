@@ -24,7 +24,7 @@ def calculate_bader_net_charges(
     valence_electrons: dict[str, float]
 ) -> np.ndarray:
     """
-    Calculate the net Bader charge for each atom given its species and Bader charge from ACF.dat.
+    Calculate the Bader net charge for each atom given its species and Bader charge from ACF.dat.
 
     The net charge is computed as `valence_electrons - bader_charges`, following
     the standard chemical convention where positive values indicate electron
@@ -41,7 +41,7 @@ def calculate_bader_net_charges(
             from the pseudopotential).
 
     Returns:
-        numpy.ndarray: A 1D float array containing the net Bader charge for each
+        numpy.ndarray: A 1D float array containing the Bader net charge for each
         atom in `species_list`.
 
     Raises:
@@ -190,7 +190,7 @@ def _sum_bader_property_by_species(
 
 def sum_bader_net_charges(
     species_list: np.ndarray | list[str] | tuple[str, ...],
-    net_bader_charges: np.ndarray | list[float] | tuple[float, ...],
+    bader_net_charges: np.ndarray | list[float] | tuple[float, ...],
     type: np.ndarray | list[str] | tuple[str, ...] | None = None,
     atol: float = 1e-3,
 ) -> dict[str, float] | dict[str, dict[str, float]]:
@@ -202,8 +202,8 @@ def sum_bader_net_charges(
 
     Args:
         species_list (array_like): A 1D array-like sequence of atomic species 
-            whose ordering matches `net_bader_charges`.
-        net_bader_charges (array_like): A 1D array-like sequence of net Bader
+            whose ordering matches `bader_net_charges`.
+        bader_net_charges (array_like): A 1D array-like sequence of Bader net
             charges for each atom in the geometry.
         type (array_like, optional): A 1D array-like sequence of types corresponding
             to each atom in the geometry. If provided, the summed charges will be
@@ -216,16 +216,16 @@ def sum_bader_net_charges(
             if `type` is provided).
 
     Raises:
-        ValueError: If `net_bader_charges`, `species_list`, or `type` is not a 
-            valid 1D finite array. Additionally, if net Bader charges are not 
+        ValueError: If `bader_net_charges`, `species_list`, or `type` is not a 
+            valid 1D finite array. Additionally, if Bader net charges are not 
             finite.
-        SizeMismatchError: If `species_list` and `net_bader_charges` differ in
+        SizeMismatchError: If `species_list` and `bader_net_charges` differ in
             length.
-        ChargeNeutralityError: If the sum of `net_bader_charges` deviates from
+        ChargeNeutralityError: If the sum of `bader_net_charges` deviates from
             zero by more than `atol`.
     """
     _validate_tolerance(atol)
-    charge_values = np.asarray(net_bader_charges, dtype=float)
+    charge_values = np.asarray(bader_net_charges, dtype=float)
     charges_by_species = _sum_bader_property_by_species(
         species_list=species_list, 
         bader_property=charge_values,

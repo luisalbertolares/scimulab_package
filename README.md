@@ -119,6 +119,11 @@ These features require the corresponding geometry or site properties to be
 present. For example, Bader properties are only available if they were parsed
 or added to the geometry.
 
+Molecular geometry comparisons use pymatgen's `MoleculeMatcher` and require
+Open Babel's Python bindings. When ignoring species, all atoms are temporarily
+represented as hydrogen; the matcher can still reject equivalent geometries
+with different atom orderings.
+
 ## Energy references
 
 Energy methods use reference values supplied either when an object is created

@@ -2,6 +2,7 @@ import math
 from collections.abc import Mapping
 
 from scimulib.exceptions import EnergyCalculationError, StoichiometryError, MissingReferenceError
+from scimulib.validation_utils import validate_vacancy_count
 
 
 def _calculate_energy_difference(
@@ -487,12 +488,7 @@ def calculate_vacancy_formation_energy(
     Note:
         Formula: E_vac = E_defective - E_pristine + num_vacancies * mu_defective_site
     """
-    if (
-        isinstance(num_vacancies, bool)
-        or not isinstance(num_vacancies, int)
-        or num_vacancies <= 0
-    ):
-        raise StoichiometryError("The number of vacancies must be a positive integer.")
+    validate_vacancy_count(num_vacancies)
 
     return _calculate_interaction_energy(
         defective_energy,

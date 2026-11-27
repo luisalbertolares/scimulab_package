@@ -1,40 +1,72 @@
 import logging
 import math
 from pathlib import Path
-from functools import cached_property
-from typing import Any, Literal, Self
-from collections import Counter
+from typing import Any, Literal
 from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from pymatgen.core import Molecule, Structure
+from pymatgen.core import Element, Molecule, Structure
 from pymatgen.analysis.molecule_matcher import MoleculeMatcher
 from pymatgen.analysis.structure_matcher import StructureMatcher
 
-from scimulib.validation_utils import ReferencePolicy, check_pymatgen_imports
+from scimulib.validation_utils import check_pymatgen_imports, validate_vacancy_count
+from scimulib.references import (
+    ATOMIC, MASS_BALANCE, Entry, ReferenceSpec, Refs, check_mass_balance,
+    key_in_composition, keys_cover, keys_cover_target, keys_within, same_atom_count,
+    same_geometry, select_target_species, single_species, stored_keys_in_target,
+)
 from scimulib.exceptions import (
     VaspExtractionError, BaderExtractionError, 
     MissingDataError, MissingGeometryError, NonPeriodicGeometryError, MissingSitePropertyError,
-    MissingReferenceError, StoichiometryError, MismatchedGeometryError
+    MissingReferenceError, StoichiometryError, EnergyCalculationError
 )
 from scimulib.visualization import AxesMode, LabelMode, RenderStyle, build_py3dmol_view
 from scimulib.abinitio_parser import VaspParser, BaderParser
 from scimulib.bader_calc import (
     calculate_bader_net_charges, sum_bader_net_charges, sum_bader_magnetic_moments
 )
-from scimulib.energy_calc import calculate_cohesive_energy, calculate_ideal_cohesive_energy, calculate_mixing_energy, calculate_strain_mixing_energy, calculate_interact_mixing_energy, calculate_vacancy_formation_energy
-
-
-_ATOM_POLICY = ReferencePolicy(label="atom", single_species=True, expected_atoms=1)
-_CLUSTER_POLICY = ReferencePolicy(label="cluster", single_species=True, same_atom_count=True)
-_CLUSTER_GEOMETRY_POLICY = ReferencePolicy(
-    label="cluster_geometry", 
-    single_species=True, 
-    same_atom_count=True, 
-    same_geometry=True
+from scimulib.energy_calc import (
+    calculate_cohesive_energy, calculate_ideal_cohesive_energy, calculate_mixing_energy,
+    calculate_strain_mixing_energy, calculate_interact_mixing_energy,
+    calculate_vacancy_formation_energy, calculate_adsorption_energy
 )
-_SYSTEM_POLICY = ReferencePolicy(label="system", single_species=False, check_mass_balance=True)
+
+
+def _validate_finite_reference_energy(energy: float, label: str) -> None:
+    """Require a reference energy to be finite.
+
+    Args:
+        energy: Energy value to validate.
+        label: Reference kind included in the error message.
+
+    Raises:
+        EnergyCalculationError: If `energy` is not finite.
+    """
+    if not math.isfinite(energy):
+        raise EnergyCalculationError(f"{label} reference energy must be finite.")
+
+
+def _infer_oxygen_vacancies(
+    pristine: Mapping[str, float], defective: Mapping[str, float]
+) -> int:
+    """Infer the number of oxygen vacancies from pristine and defective formulas.
+
+    Args:
+        pristine: Composition of the oxide before oxygen removal.
+        defective: Composition of the oxide after oxygen removal.
+
+    Returns:
+        The positive integer difference in oxygen counts.
+
+    Raises:
+        StoichiometryError: If the defective composition has no positive integer
+            oxygen deficit relative to the pristine composition.
+    """
+    difference = pristine.get("O", 0) - defective.get("O", 0)
+    if difference <= 0 or not float(difference).is_integer():
+        raise StoichiometryError("The number of oxygen vacancies must be a positive integer.")
+    return int(difference)
 
 
 class ChemicalEntity:
@@ -42,6 +74,13 @@ class ChemicalEntity:
     A class representing a chemical entity, encapsulating its name, total energy, 
     net magnetic moment, and geometric structure. It also stores any additional 
     site properties extracted from the calculation.
+
+    Optional reference mappings are copied, but entity references remain live:
+    their current geometry and energy are checked when used. Method arguments
+    override stored references for the same element only for that call.
+
+    For example: `entity.cohesive_energy()` can use references supplied with
+    `atomic_references={"Au": atom, "Cu": -2.0}` at construction.
     """
 
     def __init__(
@@ -50,7 +89,9 @@ class ChemicalEntity:
             total_energy: float | None = None, 
             net_magmom: float | None = None, 
             geometry: Structure | Molecule | None = None,
-            valence_electrons: dict[str, float] = {}
+            valence_electrons: dict[str, float] | None = None,
+            *,
+            atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
     ):
         """
         Initializes a ChemicalEntity instance.
@@ -59,42 +100,48 @@ class ChemicalEntity:
             name (str): The name of the chemical entity.
             total_energy (float | None): The total energy of the chemical entity.
             net_magmom (float | None): The net magnetic moment of the chemical entity.
-            geometry (Structure | Molecule | None): The geometric structure of the chemical entity.
+            geometry (Structure | Molecule | None): The geometric structure of the
+                chemical entity. A copy is stored so later changes to the supplied
+                object do not change this entity.
             valence_electrons (dict[str, float], optional): The valence electrons of each element in the 
                 chemical entity. Defaults to an empty dictionary.
+            atomic_references: Optional element-to-isolated-atom references or
+                total energies. They may be supplemented or overridden in a call.
 
         Raises:
-            ValueError: If both total_energy and geometry are None.
+            ValueError: If energy, magnetic moment, and geometry are all None.
         """
         check_pymatgen_imports()
 
         self.name = name
-        self.total_energy = float(total_energy)
-        self.net_magmom = float(net_magmom)
+        self.total_energy = total_energy
+        self.net_magmom = net_magmom
         self.geometry = geometry
         self.valence_electrons = valence_electrons
 
         if (
-            self.total_energy is None 
+            self._total_energy is None
             and self._structure is None 
-            and self.net_magmom is None
+            and self._net_magmom is None
         ):
             raise ValueError(
                 f"Cannot create a {self.__class__.__name__} instance. "
                 "At least one property must be provided."
             )
+        self._atomic_references = ATOMIC.store(self, atomic_references)
 
     def __repr__(self):
+        """Return a concise representation with the name, formula, and energy."""
         return (
             f"{self.__class__.__name__} (name={self.name}, "
             f"formula={self._structure.composition.formula if self._structure else 'N/A'}, "
-            f"total_energy={self.total_energy if self.total_energy is not None else 'N/A'}"
+            f"total_energy={self._total_energy if self._total_energy is not None else 'N/A'})"
         )
 
     # --- Factory Methods ---
     # Factory methods for constructing instances from external data sources
     @classmethod
-    def from_vasp(cls, directory: str | Path, name: str = None):
+    def from_vasp(cls, directory: str | Path, name: str | None = None, **references: Any):
         """
         Constructs an instance of the class from a VASP calculation directory.
 
@@ -111,17 +158,18 @@ class ChemicalEntity:
                 calculation output files (e.g., OUTCAR, vasprun.xml).
             name (str, optional): An optional name for the chemical entity. If not
                 provided, the name will default to the directory name.
+            **references: Optional reference arguments accepted by the class
+                constructor, such as `atomic_references`.
 
         Returns:
             cls: An initialized instance of the class containing the parsed VASP data.
 
         Raises:
-            ValueError: If neither the total energy nor the geometric structure 
-                could be extracted from the provided directory, making initialization 
-                impossible.
+            ValueError: If energy, magnetic moment, and geometry could not be
+                extracted from the provided directory.
 
         """
-        entity_name = name if name is not None else directory.name
+        entity_name = name if name is not None else Path(directory).name
 
         vasp_parser = VaspParser(directory=directory)
 
@@ -192,7 +240,8 @@ class ChemicalEntity:
             total_energy=total_energy,
             net_magmom=net_magmom,
             geometry=structure,
-            valence_electrons=valence_electrons
+            valence_electrons=valence_electrons,
+            **references,
         )
 
     # --- Property Getters and Setters ---
@@ -283,7 +332,8 @@ class ChemicalEntity:
         """Sets the geometric structure of the chemical entity."""
         if object is not None and not isinstance(object, (Structure, Molecule)):
             raise TypeError("Geometry must be a Structure, Molecule, or None.")
-        self._structure = object
+        self._structure = object.copy() if object is not None else None
+        self._bader_net_charges_calculated = False
 
     @property
     def valence_electrons(self) -> dict[str, float]:
@@ -303,7 +353,15 @@ class ChemicalEntity:
         """Sets the valence electrons of each element in the chemical entity."""
         if value is not None and not isinstance(value, dict):
             raise TypeError("Valence electrons must be a dictionary or None.")
-        self._valence_electrons = value if value is not None else {}
+        self._valence_electrons = value.copy() if value is not None else {}
+        if self._bader_net_charges_calculated and self._structure is not None:
+            self._structure.remove_site_property("net_bader_charge")
+            self._bader_net_charges_calculated = False
+
+    @property
+    def atomic_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored isolated-atom references, keyed by element."""
+        return self._atomic_references.copy()
 
     # --- Geometric and Compositional Attributes ---
     # Here we define property getters for geometric and compositional attributes 
@@ -324,22 +382,22 @@ class ChemicalEntity:
         """
         return self._require_geometry.cart_coords.copy()
 
-    @cached_property
-    def symbols(self) -> tuple[str]:
+    @property
+    def symbols(self) -> tuple[str, ...]:
         """Returns the chemical symbols of the atoms in the structure, if available."""
         return self._require_geometry.symbol_set
 
-    @cached_property
+    @property
     def atomic_symbols(self) -> list[str]:
         """Returns the atomic symbols of the chemical entity, if available."""
         return [site.species_string for site in self._require_geometry]
 
-    @cached_property
+    @property
     def composition(self) -> dict[str, float]:
         """Returns the composition of the chemical entity, if available."""
         return self._require_geometry.composition.get_el_amt_dict()
 
-    @cached_property
+    @property
     def atomic_fractions(self) -> dict[str, float]:
         """Returns the atomic fractions of each element in the chemical entity, if available."""
         comp = self.composition
@@ -351,7 +409,7 @@ class ChemicalEntity:
     # the geometry, such as distances, angles, and coordination numbers.
     def has_same_geometry(
         self,
-        other: Self,
+        other: "ChemicalEntity",
         ltol: float = 0.01,
         stol: float = 0.01,
         angle_tol: float = 1.0,
@@ -363,12 +421,13 @@ class ChemicalEntity:
         within the specified tolerances. Can optionally ignore species.
 
         Args:
-            other (Self): The other structure to compare with.
+            other (ChemicalEntity): The other entity to compare with.
             ltol (float): Lattice tolerance for structure comparison.
             stol (float): Site tolerance for structure comparison.
             angle_tol (float): Angle tolerance for structure comparison.
             mol_tol (float): Tolerance for molecule comparison.
-            ignore_species (bool): Whether to ignore species in the comparison.
+            ignore_species (bool): Whether to compare positions without regard
+                to the species or their distribution.
 
         Returns:
             bool: True if the geometries are considered the same, False otherwise.
@@ -382,7 +441,11 @@ class ChemicalEntity:
         if isinstance(geom_a, Structure) and isinstance(geom_b, Structure):
             matcher = StructureMatcher(ltol=ltol, stol=stol, angle_tol=angle_tol)
             if ignore_species:
-                return bool(matcher.fit_anonymous(geom_a, geom_b))
+                geom_a = geom_a.copy()
+                geom_b = geom_b.copy()
+                for structure in (geom_a, geom_b):
+                    for index in range(len(structure)):
+                        structure.replace(index, "H")
             return bool(matcher.fit(geom_a, geom_b))
 
         if isinstance(geom_a, Molecule) and isinstance(geom_b, Molecule):
@@ -414,7 +477,7 @@ class ChemicalEntity:
         """Returns the Bader charges as a numpy array, if available."""
         return self._require_site_property("bader_charge")
 
-    @cached_property
+    @property
     def bader_net_charges(self) -> np.ndarray:
         """Returns the net Bader charges as a numpy array, if available."""
         geometry = self._require_geometry
@@ -427,6 +490,7 @@ class ChemicalEntity:
             valence_electrons=self.valence_electrons
         )
         geometry.add_site_property("net_bader_charge", bader_net_charges)
+        self._bader_net_charges_calculated = True
         return np.array(bader_net_charges)
 
     @property
@@ -437,7 +501,7 @@ class ChemicalEntity:
     # --- Summed Bader Analysis Properties ---
     # These properties provide the summed Bader charges and magnetic moments 
     # per species.
-    @cached_property
+    @property
     def sum_bader_charges(self) -> dict[str, float]:
         """Sums the net Bader charges per species."""
         return sum_bader_net_charges(
@@ -445,7 +509,7 @@ class ChemicalEntity:
             net_bader_charges=self.bader_net_charges
         )
 
-    @cached_property
+    @property
     def sum_bader_magmoms(self) -> dict[str, float]:
         """Sums the Bader magnetic moments per species."""
         return sum_bader_magnetic_moments(
@@ -458,36 +522,30 @@ class ChemicalEntity:
     # The following methods correspond to energy calculations and related properties
     def cohesive_energy(
         self,
-        *atoms: Self,
-        **named_atoms: Self | float,
+        **named_atoms: ChemicalEntity | float,
     ) -> float:
         """Calculates the cohesive energy from isolated atomic references.
 
-        Atomic references can be passed positionally as single-atom `Self` 
-        (ChemicalEntity and its subclasses) instances (whose element symbol is 
-        inferred automatically) and/or as keyword arguments mapping element 
-        symbols to `Self` instances or float energies.
+        Atomic references are passed by element symbol, as single-atom
+        `ChemicalEntity` instances or numeric energies.
+        Omitted elements use `atomic_references` stored at construction; supplied
+        elements override them for this call without changing the stored mapping.
 
         Args:
-            *atoms: Isolated single-atom `Self` instances.
             **named_atoms: Keyword arguments mapping atomic symbols (e.g., 'Au', 'O')
-                to either a `Self` instance or its total energy as a float.
+                to either a `ChemicalEntity` instance or its total energy as a float.
 
         Returns:
-            float: The cohesive energy of the structure in eV.
+            float: The cohesive energy per atom, typically in eV/atom.
 
         Raises:
-            TypeError: If a positional argument is not a `Self` instance.
-            StoichiometryError: If a positional `Self` does not represent a
-                single isolated atom (1 species and 1 atom).
-            ValueError: If duplicate references are provided for the same species.
+            StoichiometryError: If an entity reference is not a single atom or
+                does not match its element symbol.
             MissingReferenceError: If atomic references are missing for any species
                 present in the structure.
         """
-        filtered_energies = self._generate_calculation_references(
-            _ATOM_POLICY, 
-            *atoms, 
-            **named_atoms
+        filtered_energies = ATOMIC.resolve(
+            self, named_atoms, stored=self._atomic_references
         )
 
         return calculate_cohesive_energy(
@@ -636,7 +694,7 @@ class ChemicalEntity:
     # This last section contains private helper methods, which includes:
     #   - Validation of geometry existence and periodicity
     #   - Validation of site properties
-    #   - Validation of reference structures according to specified policies
+    # Reference validation lives in `scimulib.references` as declarative specs.
     @property
     def _require_geometry(self) -> Structure | Molecule:
         """Returns the underlying geometry or raises MissingGeometryError."""
@@ -668,180 +726,65 @@ class ChemicalEntity:
             )
         return np.array(geometry.site_properties[property_name], dtype=float)
 
-    def _validate_reference(self, ref: ChemicalEntity, policy: ReferencePolicy):
-        """
-        Validates a reference ChemicalEntity against the specified ReferencePolicy.
 
-        Args:
-            ref (ChemicalEntity): The reference chemical entity to validate.
-            policy (ReferencePolicy): The policy against which to validate the reference.
-        
-        Raises:
-            StoichiometryError: If the reference violates any stoichiometric constraints.
-            MismatchedGeometryError: If the reference geometry does not match the expected geometry.
-            Any custom exceptions raised by the extra_validator, if provided.
-        """
-        comp = ref.composition
-        total_atoms = sum(comp.values())
+def _validate_oxygen_reference(oxygen: ChemicalEntity) -> None:
+    """Require the oxygen reference to be an O2 chemical entity.
 
-        if policy.single_species and len(comp) != 1:
-            raise StoichiometryError(
-                f"{policy.label.capitalize()} references must represent a single "
-                f"species, got: {list(comp.keys())}."
-            )
+    Args:
+        oxygen: Entity used as the molecular oxygen reference.
 
-        if policy.expected_atoms is not None and total_atoms != policy.expected_atoms:
-            raise StoichiometryError(
-                f"{policy.label.capitalize()} references must have {policy.expected_atoms} "
-                f"atom(s), got: {total_atoms}."
-            )
+    Raises:
+        TypeError: If `oxygen` is not a `ChemicalEntity`.
+        MissingGeometryError: If the entity has no geometry from which to read
+            its composition.
+        StoichiometryError: If its composition is not exactly O2.
+    """
+    if not isinstance(oxygen, ChemicalEntity):
+        raise TypeError("Oxygen must be a ChemicalEntity.")
+    if oxygen.composition != {"O": 2}:
+        raise StoichiometryError("The oxygen reference must represent an O2 molecule.")
 
-        if policy.same_atom_count and total_atoms != len(self._require_geometry):
-            raise StoichiometryError(
-                f"{policy.label.capitalize()} references must match the number of atoms "
-                f"({len(self._require_geometry)}), got: {total_atoms}."
-            )
 
-        if policy.same_geometry and not self.has_same_geometry(ref, ignore_species=True):
-            raise MismatchedGeometryError(
-                f"{policy.label.capitalize()} references must share the same geometry "
-                f"as {self.name}."
-            )
+def _check_multimetallic(cluster: ChemicalEntity) -> None:
+    """Require a cluster to contain at least two distinct metallic elements.
 
-        if policy.extra_validator is not None:
-            policy.extra_validator(self, ref)
+    Args:
+        cluster: Nanocluster whose species are checked.
 
-    def _generate_calculation_references(
-        self,
-        policy: ReferencePolicy,
-        *entities: ChemicalEntity,
-        coefficients: Mapping[str, float] | None = None,
-        **named_entities: ChemicalEntity | float,
-    ) -> dict[str, float]:
-        """
-        Generates a dictionary of calculation references based on the provided 
-        entities and policy.
+    Raises:
+        MissingGeometryError: If the cluster has no geometry.
+        StoichiometryError: If fewer than two species are metallic.
+    """
+    if sum(Element(symbol).is_metal for symbol in cluster.symbols) < 2:
+        raise StoichiometryError(
+            "Stored monometallic cluster references require a multimetallic nanocluster."
+        )
 
-        Args:
-            policy (ReferencePolicy): The policy to apply for reference validation.
-            *entities (ChemicalEntity): Positional chemical entity references.
-            coefficients: Optional positive stoichiometric coefficients keyed by
-                reference name. Every reference must have a coefficient. These
-                weight compositions for mass balance, not the returned energies.
-            **named_entities (ChemicalEntity | float): Keyword chemical entity 
-                references or numeric energies.
 
-        Returns:
-            dict[str, float]: A dictionary mapping reference keys to their 
-                corresponding energies.
+def _stored_need_multimetallic_target(refs: Refs) -> None:
+    """Require a multimetallic target when it has stored cluster references.
 
-        Raises:
-            TypeError: If a positional argument is not a ChemicalEntity.
-            ValueError: If there are duplicate reference keys or coefficients
-                do not match the reference keys.
-            StoichiometryError: If coefficients or the mass balance are invalid.
-            MissingReferenceError: If required species are not covered by 
-                the references.
-        """
-        calculation_references = {}
-        entity_objects = {}
-        covered_species = set()
+    Args:
+        refs: Reference-validation context for the target cluster.
 
-        # 1. Process positional arguments
-        for idx, entity in enumerate(entities):
-            if not isinstance(entity, ChemicalEntity):
-                raise TypeError(
-                    f"Positional arguments must be ChemicalEntity instances. "
-                    "Pass numeric energies using keywords."
-                )
+    Raises:
+        MissingGeometryError: If the target has no geometry.
+        StoichiometryError: If stored cluster references are used with a target
+            containing fewer than two metallic species.
+    """
+    if refs.stored:
+        _check_multimetallic(refs.target)
 
-            self._validate_reference(entity, policy)
-            covered_species.update(entity.composition.keys())
 
-            key = (
-                next(iter(entity.composition.keys()))
-                if policy.single_species
-                else f"{policy.label}_{idx}"
-            )
+_RELAXED_CLUSTER = ReferenceSpec(
+    "cluster",
+    key_rules=(_stored_need_multimetallic_target, stored_keys_in_target),
+    entity_rules=(single_species, key_in_composition, same_atom_count),
+    set_rules=(keys_cover_target,),
+    select=select_target_species,
+)
+_FROZEN_CLUSTER = _RELAXED_CLUSTER.extended("frozen cluster", same_geometry)
 
-            if key in calculation_references:
-                raise ValueError(f"Duplicate {policy.label} reference provided for '{key}'.")
-            calculation_references[key] = entity.total_energy
-            entity_objects[key] = entity
-
-        # 2. Process keyword arguments
-        for key, ref in named_entities.items():
-            if key in calculation_references:
-                raise ValueError(f"Duplicate {policy.label} reference provided for '{key}'.")
-
-            if isinstance(ref, ChemicalEntity):
-                self._validate_reference(ref, policy)
-                entity_objects[key] = ref
-                covered_species.update(ref.composition.keys())
-                calculation_references[key] = ref.total_energy
-            else:
-                calculation_references[key] = float(ref)
-                if policy.single_species:
-                    covered_species.add(key)
-
-        if coefficients is not None:
-            if coefficients.keys() != calculation_references.keys():
-                raise ValueError("Stoichiometric coefficients must match the reference keys.")
-            for key, coefficient in coefficients.items():
-                if not math.isfinite(coefficient) or coefficient <= 0:
-                    raise StoichiometryError(
-                        f"Stoichiometric coefficient for '{key}' must be positive "
-                        f"and finite, got {coefficient}."
-                    )
-
-        # 3. Verify that the species match self
-        required_species = set(self.symbols)
-        all_are_entities = len(entity_objects) == len(calculation_references)
-
-        if policy.single_species or all_are_entities:
-            missing_species = required_species - covered_species
-            if missing_species:
-                raise MissingReferenceError(
-                    f"{policy.label.capitalize()} references must cover all species in "
-                    f"{self.name}. Missing species: {sorted(missing_species)}."
-                )
-
-            # In fragment mode, there should also be no extra species not present in the system
-            extra_species = covered_species - required_species
-            if extra_species and not policy.single_species:
-                raise StoichiometryError(
-                    f"{policy.label.capitalize()} references contain species not present in "
-                    f"{self.name}: {sorted(extra_species)}."
-                )
-
-        # 4. Validate mass balance (when all references are entity objects)
-        if policy.check_mass_balance and all_are_entities:
-            combined_comp = Counter()
-            for key, obj in entity_objects.items():
-                coefficient = coefficients[key] if coefficients is not None else 1
-                for species, amount in obj.composition.items():
-                    combined_comp[species] += coefficient * amount
-
-            expected_comp = self.composition
-            if combined_comp.keys() != expected_comp.keys() or any(
-                (
-                    combined_comp[species] != amount
-                    if coefficients is None
-                    else not math.isclose(
-                        combined_comp[species], amount, rel_tol=0, abs_tol=1e-8
-                    )
-                )
-                for species, amount in expected_comp.items()
-            ):
-                raise StoichiometryError(
-                    f"Mass balance mismatch for {policy.label} references. "
-                    f"Combined fragments: {dict(combined_comp)}, "
-                    f"expected: {dict(self.composition)}."
-                )
-
-        if policy.single_species:
-            return {symbol: calculation_references[symbol] for symbol in required_species}
-        return calculation_references
 
 class Nanocluster(ChemicalEntity):
     """
@@ -856,22 +799,45 @@ class Nanocluster(ChemicalEntity):
             total_energy: float | None = None, 
             net_magmom: float | None = None, 
             geometry: Molecule | None = None, 
-            valence_electrons: dict[str, int] | None = None
+            valence_electrons: dict[str, int] | None = None,
+            *,
+            atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
+            relaxed_references: Mapping[str, ChemicalEntity | float] | None = None,
+            frozen_references: Mapping[str, ChemicalEntity | float] | None = None,
     ):
         """
         Initializes a nanocluster.
 
         Args:
             name: Non-empty name of the nanocluster.
-            total_energy: Total energy; currently must be convertible to float.
-            net_magmom: Net magnetic moment; currently must be convertible to float.
+            total_energy: Total energy, or None if unavailable.
+            net_magmom: Net magnetic moment, or None if unavailable.
             geometry: A `Molecule`, `Structure`, or None. Structures are converted
                 to molecules using Cartesian coordinates.
             valence_electrons: Element symbols mapped to valence-electron counts,
                 or None if unavailable.
+            atomic_references: Isolated atoms or their energies, keyed by element.
+            relaxed_references: Relaxed monometallic clusters or their energies.
+            frozen_references: Frozen monometallic clusters or their energies.
+                Cluster references are only accepted for systems containing at
+                least two metallic elements. Numeric energies cannot be checked
+                for cluster size, composition, or geometry.
         """
         super().__init__(name=name, total_energy=total_energy, net_magmom=net_magmom,
-                         geometry=geometry, valence_electrons=valence_electrons)
+                         geometry=geometry, valence_electrons=valence_electrons,
+                         atomic_references=atomic_references)
+        self._relaxed_references = _RELAXED_CLUSTER.store(self, relaxed_references)
+        self._frozen_references = _FROZEN_CLUSTER.store(self, frozen_references)
+
+    @property
+    def relaxed_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored relaxed monometallic references, keyed by element."""
+        return self._relaxed_references.copy()
+
+    @property
+    def frozen_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored frozen monometallic references, keyed by element."""
+        return self._frozen_references.copy()
 
     @ChemicalEntity.geometry.setter
     def geometry(self, object: Structure | Molecule | None):
@@ -887,9 +853,14 @@ class Nanocluster(ChemicalEntity):
         
         ChemicalEntity.geometry.fset(self, object)
 
-    def ideal_cohesive_energy(self, **named_clusters: tuple[Self | float, Self | float]) -> float:
+    def ideal_cohesive_energy(
+        self, **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float]
+    ) -> float:
         """
-        Attempts to calculate the composition-weighted ideal cohesive energy.
+        Calculates the composition-weighted ideal cohesive energy.
+
+        Missing elements use stored relaxed cluster and atomic references.
+        A supplied pair overrides both references for its element for this call.
 
         Args:
             **named_clusters: Element symbols mapped to `(cluster, atom)` pairs.
@@ -899,7 +870,7 @@ class Nanocluster(ChemicalEntity):
                 one atom of one species.
 
         Returns:
-            float: Intended ideal cohesive energy in eV/atom.
+            float: Ideal cohesive energy in eV/atom.
 
         Raises:
             MissingGeometryError: If this nanocluster or an entity reference lacks
@@ -909,11 +880,9 @@ class Nanocluster(ChemicalEntity):
                 elements in the nanocluster.
             StoichiometryError: If an entity reference is not monometallic, has the
                 wrong cluster size, or is not a single-atom atomic reference.
-            KeyError: If entity references cover the elements but their keyword
-                names do not include every element symbol.
             IndexError: If a reference pair has fewer than two entries.
-            TypeError: If a pair cannot be indexed, a reference cannot be converted
-                to float, or the current cohesive-energy helper call is reached.
+            TypeError: If a pair cannot be indexed or a reference cannot be
+                converted to float.
             ValueError: If a reference cannot be converted to float.
         """
         mono_cluster_coh = {}
@@ -925,21 +894,17 @@ class Nanocluster(ChemicalEntity):
             name: pair[1] for name, pair in named_clusters.items()
         }
 
-        mono_clusters_refs = self._generate_calculation_references(
-            _CLUSTER_POLICY,
-            **mono_clusters
+        mono_clusters_refs = _RELAXED_CLUSTER.resolve(
+            self, mono_clusters, stored=self._relaxed_references
         )
-        atom_refs = self._generate_calculation_references(
-            _ATOM_POLICY,
-            **atoms
-        )
+        atom_refs = ATOMIC.resolve(self, atoms, stored=self._atomic_references)
 
+        total_atoms = len(self._require_geometry)
         for name, ref in mono_clusters_refs.items():
             mono_cluster_coh[name] = calculate_cohesive_energy(
-                total_energy=ref.total_energy if isinstance(ref, ChemicalEntity) else None,
-                num_atoms=atoms[name],
-                atomic_counts=atom_refs[name].atomic_counts if isinstance(
-                    atom_refs[name], ChemicalEntity) else None
+                total_energy=ref,
+                atomic_energies={name: atom_refs[name]},
+                atomic_counts={name: total_atoms},
             )
 
         return calculate_ideal_cohesive_energy(
@@ -947,16 +912,20 @@ class Nanocluster(ChemicalEntity):
             atomic_fractions=self.atomic_fractions
         )
 
-    def mix_cohesive_energy(self, **named_clusters: tuple[Self | float, Self | float]) -> float:
+    def mix_cohesive_energy(
+        self, **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float]
+    ) -> float:
         """
-        Attempts to calculate cohesive energy relative to the ideal value.
+        Calculates cohesive energy relative to the ideal value.
+
+        Missing elements use the stored relaxed cluster and atomic references.
 
         Args:
             **named_clusters: Element symbols mapped to `(cluster, atom)` pairs,
                 as accepted by `ideal_cohesive_energy`.
 
         Returns:
-            float: Intended difference in cohesive energies, in eV/atom.
+            float: Difference in cohesive energies, in eV/atom.
 
         Raises:
             MissingGeometryError: If this nanocluster or an entity reference lacks
@@ -965,23 +934,23 @@ class Nanocluster(ChemicalEntity):
             MissingReferenceError: If references do not cover every element.
             StoichiometryError: If an entity reference is not monometallic, has an
                 incorrect cluster size, or is not a single-atom atomic reference.
-            KeyError: If entity references cover the elements but their keyword
-                names do not include every element symbol.
             IndexError: If a reference pair has fewer than two entries.
-            TypeError: If a pair cannot be indexed, a reference cannot be converted
-                to float, or either of the incompatible calls described below is reached.
+            TypeError: If a pair cannot be indexed or a reference cannot be
+                converted to float.
             ValueError: If a reference cannot be converted to float.
         """
         ideal_coh = self.ideal_cohesive_energy(**named_clusters)
-        return self.cohesive_energy - ideal_coh
+        atoms = {name: pair[1] for name, pair in named_clusters.items()}
+        return self.cohesive_energy(**atoms) - ideal_coh
 
-    def mixing_energy(self, *clusters: Self, **named_clusters: Self | float) -> float:
+    def mixing_energy(self, **named_clusters: ChemicalEntity | float) -> float:
         """
         Calculates the mixing energy relative to relaxed monometallic clusters.
 
+        Omitted elements use stored relaxed references; supplied elements override
+        them for this call.
+
         Args:
-            *clusters: Monometallic `ChemicalEntity` references; element symbols
-                are inferred from their compositions.
             **named_clusters: Element symbols mapped to monometallic
                 `ChemicalEntity` references or numeric total energies. Entity
                 references must have the same number of atoms as this nanocluster.
@@ -995,10 +964,8 @@ class Nanocluster(ChemicalEntity):
                 the geometry needed to validate the references.
             MissingDataError: If this nanocluster or an entity reference lacks a
                 total energy.
-            TypeError: If a positional reference is not a `ChemicalEntity` or a
-                keyword energy cannot be converted to float.
-            ValueError: If a reference is duplicated or a keyword energy cannot be
-                converted to float.
+            TypeError: If a keyword energy cannot be converted to float.
+            ValueError: If a keyword energy cannot be converted to float.
             StoichiometryError: If an entity reference is not monometallic or has
                 the wrong atom count, or if the atomic fractions are invalid.
             MissingReferenceError: If a monometallic reference is missing for any
@@ -1008,10 +975,8 @@ class Nanocluster(ChemicalEntity):
             EnergyCalculationError: If the alloy or a used reference energy is
                 non-finite.
         """
-        cluster_refs = self._generate_calculation_references(
-            _CLUSTER_POLICY, 
-            *clusters, 
-            **named_clusters
+        cluster_refs = _RELAXED_CLUSTER.resolve(
+            self, named_clusters, stored=self._relaxed_references
         )
 
         return calculate_mixing_energy(
@@ -1020,9 +985,14 @@ class Nanocluster(ChemicalEntity):
             atomic_fractions=self.atomic_fractions
         )
     
-    def strain_mixing_energy(self, **named_clusters: tuple[Self | float, Self | float]) -> float:
+    def strain_mixing_energy(
+        self, **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float]
+    ) -> float:
         """
         Calculates a composition-weighted difference between cluster references.
+
+        Omitted elements use stored frozen and relaxed references. A supplied
+        pair overrides both references for its element for this call.
 
         Args:
             **named_clusters: Element symbols mapped to `(frozen, relaxed)` pairs
@@ -1032,7 +1002,7 @@ class Nanocluster(ChemicalEntity):
                 Geometry and atom counts cannot be checked for numeric references.
 
         Returns:
-            float: Currently `sum(x_i * (E_relaxed_i - E_frozen_i))`, in the energy
+            float: `sum(x_i * (E_frozen_i - E_relaxed_i))`, in the energy
             units of the inputs (typically eV).
 
         Raises:
@@ -1062,11 +1032,11 @@ class Nanocluster(ChemicalEntity):
             name: pair[1] for name, pair in named_clusters.items()
         }
         
-        frozen_refs = self._generate_calculation_references(
-            _CLUSTER_GEOMETRY_POLICY, **frozen_clusters
+        frozen_refs = _FROZEN_CLUSTER.resolve(
+            self, frozen_clusters, stored=self._frozen_references
         )
-        relaxed_refs = self._generate_calculation_references(
-            _CLUSTER_POLICY, **relaxed_clusters
+        relaxed_refs = _RELAXED_CLUSTER.resolve(
+            self, relaxed_clusters, stored=self._relaxed_references
         )
         
         return calculate_strain_mixing_energy(
@@ -1075,13 +1045,14 @@ class Nanocluster(ChemicalEntity):
             atomic_fractions=self.atomic_fractions
         )
 
-    def interaction_mixing_energy(self, *clusters: Self, **named_clusters: Self | float) -> float:
+    def interaction_mixing_energy(self, **named_clusters: ChemicalEntity | float) -> float:
         """
         Attempts to calculate the interaction contribution to mixing energy.
 
+        Omitted elements use stored frozen references; supplied elements override
+        them for this call.
+
         Args:
-            *clusters: Frozen monometallic `ChemicalEntity` references whose
-                element symbols are inferred from their compositions.
             **named_clusters: Element symbols mapped to frozen monometallic
                 `ChemicalEntity` references or numeric total energies. Entity
                 references must match the nanocluster's atom count and geometry;
@@ -1105,16 +1076,11 @@ class Nanocluster(ChemicalEntity):
                 the Open Babel Python bindings are unavailable.
             KeyError: If entity references cover the elements but their keyword
                 names do not include every element symbol.
-            TypeError: If a positional reference is not a `ChemicalEntity`, a
-                keyword energy cannot be converted to float, or the current
-                interaction-energy helper call is reached.
-            ValueError: If a reference is duplicated or a keyword energy cannot be
-                converted to float.
+            TypeError: If a keyword energy cannot be converted to float.
+            ValueError: If a keyword energy cannot be converted to float.
         """
-        frozen_refs = self._generate_calculation_references(
-            _CLUSTER_GEOMETRY_POLICY,
-            *clusters,
-            **named_clusters
+        frozen_refs = _FROZEN_CLUSTER.resolve(
+            self, named_clusters, stored=self._frozen_references
         )
 
         return calculate_interact_mixing_energy(
@@ -1122,7 +1088,6 @@ class Nanocluster(ChemicalEntity):
             frozen_energies=frozen_refs,
             atomic_fractions=self.atomic_fractions
         )
-
 
 class Surface(ChemicalEntity):
     """A periodic surface model representing a great variety of materials."""
@@ -1133,7 +1098,9 @@ class Surface(ChemicalEntity):
         total_energy: float | None = None, 
         net_magmom: float | None = None, 
         geometry: Structure | None = None, 
-        valence_electrons: dict[str, int] | None = None
+        valence_electrons: dict[str, int] | None = None,
+        *,
+        atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
     ):
         """
         Initializes a surface model.
@@ -1145,9 +1112,11 @@ class Surface(ChemicalEntity):
             geometry (Structure | None): The geometry of the surface model.
             valence_electrons (dict[str, int] | None): The valence electrons of the 
                 surface model.
+            atomic_references: Isolated atoms or their energies, keyed by element.
         """
         super().__init__(name=name, total_energy=total_energy, net_magmom=net_magmom,
-                         geometry=geometry, valence_electrons=valence_electrons)
+                         geometry=geometry, valence_electrons=valence_electrons,
+                         atomic_references=atomic_references)
 
         
 class MetalOxide(Surface):
@@ -1159,7 +1128,11 @@ class MetalOxide(Surface):
         total_energy: float | None = None, 
         net_magmom: float | None = None, 
         geometry: Structure | None = None, 
-        valence_electrons: dict[str, int] | None = None
+        valence_electrons: dict[str, int] | None = None,
+        *,
+        atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
+        pristine_reference: MetalOxide | None = None,
+        oxygen_reference: ChemicalEntity | None = None,
     ):
         """
         Initializes a metal oxide surface model.
@@ -1171,14 +1144,50 @@ class MetalOxide(Surface):
             geometry (Structure | None): The geometry of the metal oxide surface model.
             valence_electrons (dict[str, int] | None): The valence electrons of the 
                 metal oxide surface model.
+            atomic_references: Isolated atoms or their energies, keyed by element.
+            pristine_reference: Pristine oxide for vacancy calculations.
+            oxygen_reference: O2 molecule for vacancy calculations.
+                When both are provided, their mass balance is checked against
+                the number of missing oxygen atoms inferred from the geometries.
         """
         super().__init__(name=name, total_energy=total_energy, net_magmom=net_magmom,
-                         geometry=geometry, valence_electrons=valence_electrons)
+                         geometry=geometry, valence_electrons=valence_electrons,
+                         atomic_references=atomic_references)
+        if pristine_reference is not None:
+            if not isinstance(pristine_reference, MetalOxide):
+                raise TypeError("Pristine must be a MetalOxide.")
+            pristine_reference._require_geometry
+            _validate_finite_reference_energy(pristine_reference.total_energy, "Pristine")
+        if oxygen_reference is not None:
+            _validate_oxygen_reference(oxygen_reference)
+            _validate_finite_reference_energy(oxygen_reference.total_energy, "Oxygen")
+        self._pristine_reference = pristine_reference
+        self._oxygen_reference = oxygen_reference
+        if pristine_reference is not None and oxygen_reference is not None:
+            oxygen_difference = _infer_oxygen_vacancies(
+                pristine_reference.composition, self.composition
+            )
+            check_mass_balance(
+                pristine_reference,
+                {"defective": self, "oxygen": oxygen_reference},
+                coefficients={"defective": 1, "oxygen": oxygen_difference / 2},
+            )
+
+    @property
+    def pristine_reference(self) -> MetalOxide | None:
+        """Stored pristine oxide for vacancy calculations."""
+        return self._pristine_reference
+
+    @property
+    def oxygen_reference(self) -> ChemicalEntity | None:
+        """Stored O2 molecule for vacancy calculations."""
+        return self._oxygen_reference
 
     def vacancy_formation_energy(
         self,
-        pristine: MetalOxide,
-        oxygen: ChemicalEntity,
+        *,
+        pristine: MetalOxide | None = None,
+        oxygen: ChemicalEntity | None = None,
         num_vacancies: int = 1
     ) -> float:
         """Calculate the total oxygen-vacancy formation energy.
@@ -1186,6 +1195,10 @@ class MetalOxide(Surface):
         This instance is the defective oxide. `pristine` is the oxide before
         oxygen removal and `oxygen` is an O2 reference with its total molecular
         energy. All three energies must use the same units (typically eV).
+        Omitted references use those stored on the instance; explicit references
+        must be passed by keyword and override them for this call only. The
+        vacancy count defaults to one even when references are stored, and must
+        be specified for multiple vacancies.
 
         The result is E_defective - E_pristine + num_vacancies * E_O2 / 2.
         Entity geometries are required to validate the oxygen reference and
@@ -1199,18 +1212,19 @@ class MetalOxide(Surface):
             MissingDataError: If an entity lacks total energy.
             EnergyCalculationError: If an energy is non-finite.
         """
+        pristine = pristine if pristine is not None else self._pristine_reference
+        oxygen = oxygen if oxygen is not None else self._oxygen_reference
+        if pristine is None or oxygen is None:
+            raise MissingReferenceError("Pristine oxide and O2 references are required.")
         if not isinstance(pristine, MetalOxide) or not isinstance(oxygen, ChemicalEntity):
             raise TypeError("Pristine must be a MetalOxide and oxygen a ChemicalEntity.")
-        if isinstance(num_vacancies, bool) or not isinstance(num_vacancies, int) or num_vacancies <= 0:
-            raise StoichiometryError("The number of vacancies must be a positive integer.")
-        if oxygen.composition != {"O": 2}:
-            raise StoichiometryError("The oxygen reference must represent an O2 molecule.")
+        validate_vacancy_count(num_vacancies)
+        _validate_oxygen_reference(oxygen)
 
-        references = pristine._generate_calculation_references(
-            _SYSTEM_POLICY,
+        references = MASS_BALANCE.resolve(
+            pristine,
+            {"defective": self, "oxygen": oxygen},
             coefficients={"defective": 1, "oxygen": num_vacancies / 2},
-            defective=self,
-            oxygen=oxygen,
         )
         return calculate_vacancy_formation_energy(
             defective_energy=references["defective"],
@@ -1219,4 +1233,387 @@ class MetalOxide(Surface):
             num_vacancies=num_vacancies,
         )
 
-    
+def _nanocluster_species(system: SupportedSystem) -> set[str]:
+    """Return the distinct element symbols in a supported system's nanocluster.
+
+    Args:
+        system: Supported system whose nanocluster is inspected.
+
+    Returns:
+        The set of element symbols in the nanocluster.
+
+    Raises:
+        MissingGeometryError: If the nanocluster has no geometry.
+    """
+    return set(system.nanocluster.symbols)
+
+
+def _stored_need_multimetallic_nanocluster(refs: Refs) -> None:
+    """Require a multimetallic nanocluster when supported references are stored.
+
+    Args:
+        refs: Reference-validation context for a supported system.
+
+    Raises:
+        MissingGeometryError: If the target nanocluster has no geometry.
+        StoichiometryError: If stored supported references are used with a
+            nanocluster containing fewer than two metallic species.
+    """
+    if refs.stored:
+        _check_multimetallic(refs.target.nanocluster)
+
+
+def _supported_composition(entry: Entry) -> None:
+    """Require a supported reference to hold the support plus one cluster species.
+
+    Args:
+        entry: Supported-system entity reference being validated.
+
+    Raises:
+        MissingGeometryError: If a component or reference lacks a geometry
+            needed to determine its composition.
+        StoichiometryError: If the reference composition differs from the
+            expected support-plus-cluster composition.
+    """
+    system = entry.target
+    expected = dict(system.surface.composition)
+    expected[entry.key] = expected.get(entry.key, 0) + sum(system.nanocluster.composition.values())
+    if entry.composition != expected:
+        raise StoichiometryError(
+            f"Supported reference '{entry.key}' has composition "
+            f"{entry.composition}, expected {expected}."
+        )
+
+
+_SUPPORTED_RELAXED = ReferenceSpec(
+    "supported cluster",
+    key_rules=(
+        _stored_need_multimetallic_nanocluster,
+        keys_within(_nanocluster_species),
+        keys_cover(_nanocluster_species),
+    ),
+    entity_rules=(_supported_composition,),
+)
+_SUPPORTED_FROZEN = _SUPPORTED_RELAXED.extended("frozen supported cluster", same_geometry)
+
+
+class SupportedSystem(ChemicalEntity):
+    """A nanocluster supported on a surface.
+
+    The component geometries and the supported geometry must have identical
+    combined compositions. Components and entity references remain live and
+    are revalidated when used.
+
+    Relaxed and frozen references are complete supported systems: each has the
+    same surface composition and a monometallic cluster of the original size.
+    Frozen entity references must also match the complete system geometry.
+    Numeric references are total energies of those complete systems; their
+    composition and geometry cannot be checked.
+
+    Atomic, relaxed and frozen references may be stored or supplied to energy
+    methods. Stored mappings may be partial; supplied values override them for
+    one call, and live references are checked again when used. For oxygen
+    vacancies, a pristine supported system and O2 can also be stored;
+    otherwise O2 may come from the oxide surface.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        total_energy: float | None = None,
+        net_magmom: float | None = None,
+        geometry: Structure | Molecule | None = None,
+        valence_electrons: dict[str, float] | None = None,
+        *,
+        nanocluster: Nanocluster,
+        surface: Surface,
+        atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
+        relaxed_references: Mapping[str, ChemicalEntity | float] | None = None,
+        frozen_references: Mapping[str, ChemicalEntity | float] | None = None,
+        pristine_reference: "SupportedSystem | None" = None,
+        oxygen_reference: ChemicalEntity | None = None,
+    ):
+        """Create a supported system and validate its components and references.
+
+        Args:
+            name: Name of the supported system.
+            total_energy: Total energy, or None if unavailable.
+            net_magmom: Net magnetic moment, or None if unavailable.
+            geometry: Combined geometry of the supported system.
+            valence_electrons: Valence-electron counts keyed by element.
+            nanocluster: Isolated nanocluster component.
+            surface: Isolated surface component.
+            atomic_references: Optional isolated-atom references keyed by element.
+            relaxed_references: Optional relaxed supported references keyed by
+                nanocluster species.
+            frozen_references: Optional frozen supported references keyed by
+                nanocluster species.
+            pristine_reference: Optional pristine supported system for vacancy
+                calculations.
+            oxygen_reference: Optional O2 reference for vacancy calculations.
+
+        Raises:
+            TypeError: If a component or vacancy reference has an unsupported type.
+            MissingGeometryError: If a required component or entity reference
+                lacks geometry.
+            MissingDataError: If a validated entity reference lacks total energy.
+            MismatchedGeometryError: If a frozen reference does not match the
+                supported-system geometry.
+            StoichiometryError: If component or reference compositions do not
+                balance, or the oxygen reference is not O2.
+            EnergyCalculationError: If a stored vacancy reference energy is
+                non-finite.
+        """
+        if not isinstance(nanocluster, Nanocluster):
+            raise TypeError("Nanocluster must be a Nanocluster.")
+        if not isinstance(surface, Surface):
+            raise TypeError("Surface must be a Surface.")
+        self._nanocluster = nanocluster
+        self._surface = surface
+        super().__init__(
+            name, total_energy, net_magmom, geometry, valence_electrons,
+            atomic_references=atomic_references,
+        )
+        self._validate_components()
+        self._relaxed_references = _SUPPORTED_RELAXED.store(self, relaxed_references)
+        self._frozen_references = _SUPPORTED_FROZEN.store(self, frozen_references)
+        if pristine_reference is not None:
+            if not isinstance(pristine_reference, SupportedSystem):
+                raise TypeError("Pristine must be a SupportedSystem.")
+            if not isinstance(pristine_reference.surface, MetalOxide):
+                raise TypeError("Pristine must have a MetalOxide surface.")
+            pristine_reference._validate_components()
+            _validate_finite_reference_energy(pristine_reference.total_energy, "Pristine")
+        if oxygen_reference is not None:
+            _validate_oxygen_reference(oxygen_reference)
+            _validate_finite_reference_energy(oxygen_reference.total_energy, "Oxygen")
+        self._pristine_reference = pristine_reference
+        self._oxygen_reference = oxygen_reference
+        if pristine_reference is not None and oxygen_reference is not None:
+            oxygen_difference = _infer_oxygen_vacancies(
+                pristine_reference.surface.composition, self.surface.composition
+            )
+            self._validate_vacancy_composition(
+                pristine_reference, oxygen_reference, oxygen_difference
+            )
+
+    @property
+    def nanocluster(self) -> Nanocluster:
+        """The isolated nanocluster used as a component reference."""
+        return self._nanocluster
+
+    @property
+    def surface(self) -> Surface:
+        """The isolated surface used as a component reference."""
+        return self._surface
+
+    @property
+    def relaxed_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored relaxed supported references, keyed by nanocluster element."""
+        return self._relaxed_references.copy()
+
+    @property
+    def frozen_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored frozen supported references, keyed by nanocluster element."""
+        return self._frozen_references.copy()
+
+    @property
+    def pristine_reference(self) -> "SupportedSystem | None":
+        """Stored pristine supported system for vacancy calculations."""
+        return self._pristine_reference
+
+    @property
+    def oxygen_reference(self) -> ChemicalEntity | None:
+        """Stored O2 reference for vacancy calculations."""
+        return self._oxygen_reference
+
+    @property
+    def _mixing_atomic_fractions(self) -> dict[str, float]:
+        """Return the atomic fractions of the nanocluster component."""
+        return self.nanocluster.atomic_fractions
+
+    def _validate_components(self) -> None:
+        """Require the system composition to equal its surface and cluster parts.
+
+        Raises:
+            MissingGeometryError: If the supported system or a component lacks
+                geometry.
+            StoichiometryError: If the component compositions do not balance
+                with the supported-system composition.
+        """
+        check_mass_balance(self, {"nanocluster": self.nanocluster, "surface": self.surface})
+
+    def adsorption_energy(self) -> float:
+        """Return E_supported - E_surface - E_nanocluster."""
+        self._validate_components()
+        return calculate_adsorption_energy(
+            self.total_energy, self.surface.total_energy, self.nanocluster.total_energy
+        )
+
+    def cohesive_energy(self, **named_atoms: ChemicalEntity | float) -> float:
+        """Return the cohesive energy per atom of the complete supported system."""
+        self._validate_components()
+        return super().cohesive_energy(**named_atoms)
+
+    def ideal_cohesive_energy(
+        self,
+        *,
+        atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
+        **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float],
+    ) -> float:
+        """Average complete-reference cohesive energies using cluster fractions.
+
+        Pairs map cluster species to (supported monometallic reference, atom).
+        Atomic references for surface species may be stored at construction or
+        supplied through `atomic_references`; pairs override them for this call.
+        """
+        clusters = {name: pair[0] for name, pair in named_clusters.items()}
+        atoms = dict(atomic_references) if atomic_references is not None else {}
+        atoms.update({name: pair[1] for name, pair in named_clusters.items()})
+        self._validate_components()
+        cluster_refs = _SUPPORTED_RELAXED.resolve(
+            self, clusters, stored=self._relaxed_references
+        )
+        atom_refs = ATOMIC.resolve(self, atoms, stored=self._atomic_references)
+        surface_comp = self.surface.composition
+        cluster_size = sum(self.nanocluster.composition.values())
+        cohesive = {}
+        for symbol, energy in cluster_refs.items():
+            counts = dict(surface_comp)
+            counts[symbol] = counts.get(symbol, 0) + cluster_size
+            cohesive[symbol] = calculate_cohesive_energy(
+                energy, atom_refs, counts
+            )
+        return calculate_ideal_cohesive_energy(cohesive, self._mixing_atomic_fractions)
+
+    def mix_cohesive_energy(
+        self,
+        *,
+        atomic_references: Mapping[str, ChemicalEntity | float] | None = None,
+        **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float],
+    ) -> float:
+        """Return complete-system cohesion minus the ideal cohesive energy."""
+        atoms = dict(atomic_references) if atomic_references is not None else {}
+        atoms.update({name: pair[1] for name, pair in named_clusters.items()})
+        return self.cohesive_energy(**atoms) - self.ideal_cohesive_energy(
+            atomic_references=atomic_references, **named_clusters
+        )
+
+    def mixing_energy(self, **named_clusters: ChemicalEntity | float) -> float:
+        """Return mixing energy using relaxed complete-system references.
+
+        References are keyed by nanocluster species and weighted by their
+        nanocluster fractions; supplied values override stored references.
+        """
+        self._validate_components()
+        cluster_refs = _SUPPORTED_RELAXED.resolve(
+            self, named_clusters, stored=self._relaxed_references
+        )
+        return calculate_mixing_energy(
+            alloy_energy=self.total_energy,
+            mono_energies=cluster_refs,
+            atomic_fractions=self._mixing_atomic_fractions,
+        )
+
+    def strain_mixing_energy(
+        self, **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float]
+    ) -> float:
+        """Return strain mixing energy using (frozen, relaxed) supported references.
+
+        Entity references contain the complete support and monometallic
+        cluster; frozen geometries must match the complete system.
+        """
+        frozen_clusters = {name: pair[0] for name, pair in named_clusters.items()}
+        relaxed_clusters = {name: pair[1] for name, pair in named_clusters.items()}
+        self._validate_components()
+        frozen_refs = _SUPPORTED_FROZEN.resolve(
+            self, frozen_clusters, stored=self._frozen_references
+        )
+        relaxed_refs = _SUPPORTED_RELAXED.resolve(
+            self, relaxed_clusters, stored=self._relaxed_references
+        )
+        return calculate_strain_mixing_energy(
+            frozen_energies=frozen_refs,
+            relaxed_energies=relaxed_refs,
+            atomic_fractions=self._mixing_atomic_fractions,
+        )
+
+    def interaction_mixing_energy(self, **named_clusters: ChemicalEntity | float) -> float:
+        """Return interaction mixing energy using frozen complete-system references."""
+        self._validate_components()
+        frozen_refs = _SUPPORTED_FROZEN.resolve(
+            self, named_clusters, stored=self._frozen_references
+        )
+        return calculate_interact_mixing_energy(
+            alloy_energy=self.total_energy,
+            frozen_energies=frozen_refs,
+            atomic_fractions=self._mixing_atomic_fractions,
+        )
+
+    def vacancy_formation_energy(
+        self,
+        *,
+        pristine: "SupportedSystem | None" = None,
+        oxygen: ChemicalEntity | None = None,
+        num_vacancies: int = 1,
+    ) -> float:
+        """Return oxygen-vacancy formation energy relative to a pristine supported system.
+
+        Omitted references use those stored on this instance. If no O2 is
+        stored here, the reference stored on the defective oxide is used.
+        Both supported systems must balance with `num_vacancies / 2` O2.
+        """
+        if not isinstance(self.surface, MetalOxide):
+            raise TypeError("Vacancy formation requires a MetalOxide surface.")
+        pristine = pristine if pristine is not None else self.pristine_reference
+        if pristine is None:
+            raise MissingReferenceError("A pristine supported system is required.")
+        if not isinstance(pristine, SupportedSystem):
+            raise TypeError("Pristine must be a SupportedSystem.")
+        if not isinstance(pristine.surface, MetalOxide):
+            raise TypeError("Pristine must have a MetalOxide surface.")
+        if oxygen is None:
+            oxygen = self.oxygen_reference
+        if oxygen is None:
+            oxygen = self.surface.oxygen_reference
+        if oxygen is None:
+            raise MissingReferenceError("An O2 reference is required.")
+        validate_vacancy_count(num_vacancies)
+        _validate_oxygen_reference(oxygen)
+        self._validate_components()
+        pristine._validate_components()
+        self._validate_vacancy_composition(pristine, oxygen, num_vacancies)
+        references = MASS_BALANCE.resolve(
+            pristine,
+            {"defective": self, "oxygen": oxygen},
+            coefficients={"defective": 1, "oxygen": num_vacancies / 2},
+        )
+        return calculate_vacancy_formation_energy(
+            defective_energy=references["defective"],
+            pristine_energy=pristine.total_energy,
+            defective_site_energy=references["oxygen"] / 2,
+            num_vacancies=num_vacancies,
+        )
+
+    def _validate_vacancy_composition(
+        self, pristine: "SupportedSystem", oxygen: ChemicalEntity, num_vacancies: int
+    ) -> None:
+        """Validate cluster consistency and surface mass balance for vacancies.
+
+        Args:
+            pristine: Pristine supported system used as the vacancy reference.
+            oxygen: O2 entity used to balance the removed oxygen.
+            num_vacancies: Number of oxygen vacancies represented.
+
+        Raises:
+            MissingGeometryError: If a required composition cannot be read.
+            StoichiometryError: If cluster compositions differ or the defective
+                surface plus oxygen does not balance with the pristine surface.
+        """
+        if self.nanocluster.composition != pristine.nanocluster.composition:
+            raise StoichiometryError("Pristine and defective nanoclusters must have the same composition.")
+        check_mass_balance(
+            pristine.surface,
+            {"defective": self.surface, "oxygen": oxygen},
+            coefficients={"defective": 1, "oxygen": num_vacancies / 2},
+        )

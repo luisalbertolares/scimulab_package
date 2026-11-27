@@ -616,7 +616,7 @@ class ChemicalEntity:
     def visualize_property(
         self,
         *,
-        atom_property: str | Sequence[float] | np.ndarray,
+        property: str | Sequence[float] | np.ndarray,
         width: int = 600,
         height: int = 450,
         style: RenderStyle = "ball_and_stick",
@@ -636,7 +636,7 @@ class ChemicalEntity:
         """Visualizes a per-atom property as colors with an accompanying colorbar.
 
         Args:
-            atom_property: A `site_properties` key (for example, `'charge'`) or a
+            property: A `site_properties` key (for example, `'charge'`) or a
                 1D sequence/NumPy array containing one value per site.
             width: Viewer canvas width in pixels. Defaults to 600.
             height: Viewer canvas height in pixels. Defaults to 450.
@@ -664,13 +664,13 @@ class ChemicalEntity:
         Returns:
             A `ColorbarView` containing the viewer and color scale.
         """
-        if atom_property is None:
-            raise ValueError("'atom_property' is required for property visualization.")
-        if isinstance(atom_property, str):
-            prop_values = self._require_site_property(atom_property)
-            resolved_name = atom_property if property_name is None else property_name
+        if property is None:
+            raise ValueError("'property' is required for property visualization.")
+        if isinstance(property, str):
+            prop_values = self._require_site_property(property)
+            resolved_name = property if property_name is None else property_name
         else:
-            prop_values = atom_property
+            prop_values = property
             resolved_name = property_name
 
         return build_py3dmol_view(

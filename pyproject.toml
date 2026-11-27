@@ -6,12 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "scimulib"
 version = "0.1.0"
 description = "A Python package for post-processing ab initio calculation results of nanoparticle models, surfaces, and supported nanoparticle systems."
-authors = [{name = "Luis Alberto Lares Rangel", email="luis.lares@icat.unam.mx"}, 
-{name = "Ana Elizabeth Torres Hernández", email="ana.torres@icat.unam.mx"}]
-license = {file = "LICENSE"}
+authors = [
+    { name = "Luis Alberto Lares Rangel", email = "luis.lares@icat.unam.mx" },
+    { name = "Ana Elizabeth Torres Hernández", email = "ana.torres@icat.unam.mx" },
+]
 readme = "README.md"
-requires-python = ">=3.4"
+requires-python = ">=3.10"
 dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+visualization = ["matplotlib", "py3Dmol"]
+test = ["pytest"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

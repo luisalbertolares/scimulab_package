@@ -829,16 +829,6 @@ class Nanocluster(ChemicalEntity):
         self._relaxed_references = _RELAXED_CLUSTER.store(self, relaxed_references)
         self._frozen_references = _FROZEN_CLUSTER.store(self, frozen_references)
 
-    @property
-    def relaxed_references(self) -> dict[str, ChemicalEntity | float]:
-        """Stored relaxed monometallic references, keyed by element."""
-        return self._relaxed_references.copy()
-
-    @property
-    def frozen_references(self) -> dict[str, ChemicalEntity | float]:
-        """Stored frozen monometallic references, keyed by element."""
-        return self._frozen_references.copy()
-
     @ChemicalEntity.geometry.setter
     def geometry(self, object: Structure | Molecule | None):
         """Sets the nanocluster geometry, converting a `Structure` to a `Molecule`."""
@@ -852,6 +842,16 @@ class Nanocluster(ChemicalEntity):
             raise TypeError("Geometry must be a Structure, Molecule, or None.")
         
         ChemicalEntity.geometry.fset(self, object)
+
+    @property
+    def relaxed_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored relaxed monometallic references, keyed by element."""
+        return self._relaxed_references.copy()
+
+    @property
+    def frozen_references(self) -> dict[str, ChemicalEntity | float]:
+        """Stored frozen monometallic references, keyed by element."""
+        return self._frozen_references.copy()
 
     def ideal_cohesive_energy(
         self, **named_clusters: tuple[ChemicalEntity | float, ChemicalEntity | float]

@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from pathlib import Path
+from typing import get_type_hints
 
 from math import isclose
 import numpy as np
@@ -15,7 +17,8 @@ from scimulib.exceptions import (
     StoichiometryError,
     VaspExtractionError,
 )
-from scimulib.scimulib import ChemicalEntity, Nanocluster, Surface
+from scimulib.scimulib import ChemicalEntity, MetalOxide, Nanocluster, SupportedSystem, Surface
+from scimulib.scimulib import _nanocluster_species
 
 
 # Path of the test output files from VASP (Au7Co6 cluster)
@@ -90,6 +93,16 @@ test_entity = ChemicalEntity(
     geometry=test_structure
 )
 
+
+def test_forward_reference_annotations_resolve():
+    assert get_type_hints(ChemicalEntity.__init__)["atomic_references"] == (
+        Mapping[str, ChemicalEntity | float] | None
+    )
+    assert get_type_hints(MetalOxide.__init__)["pristine_reference"] == MetalOxide | None
+    assert get_type_hints(MetalOxide.pristine_reference.fget)["return"] == MetalOxide | None
+    assert get_type_hints(_nanocluster_species)["system"] is SupportedSystem
+
+
 def test_chemical_entity_properties():
     assert test_entity.name == "Au7Co6"
     assert isclose(test_entity.total_energy, energy_txt, rel_tol=1e-6)
@@ -98,7 +111,7 @@ def test_chemical_entity_properties():
     assert np.allclose(test_entity.bader_magnetic_moments, bader_magnetic_moments)
     assert np.allclose(test_entity.fractional_coords, test_structure.frac_coords)
     assert np.allclose(test_entity.cartesian_coords, test_structure.cart_coords)
-    assert test_entity.composition == test_structure.composition
+    assert test_entity.composition == test_structure.composition.get_el_amt_dict()
 
 def test_chemical_entity_from_vasp():
     vasp_entity = ChemicalEntity.from_vasp(
@@ -112,7 +125,7 @@ def test_chemical_entity_from_vasp():
     assert np.allclose(vasp_entity.bader_magnetic_moments, bader_magnetic_moments)
     assert np.allclose(vasp_entity.fractional_coords, test_structure.frac_coords)
     assert np.allclose(vasp_entity.cartesian_coords, test_structure.cart_coords)
-    assert vasp_entity.composition == test_structure.composition
+    assert vasp_entity.composition == test_structure.composition.get_el_amt_dict()
 
 
 def test_optional_data_and_from_vasp_string_directory():

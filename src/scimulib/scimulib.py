@@ -1,10 +1,11 @@
+from __future__ import annotations
 import logging
-import math
 from pathlib import Path
 from typing import Any, Literal
 from collections.abc import Mapping, Sequence
 
 import numpy as np
+import math
 
 from pymatgen.core import Element, Molecule, Structure
 from pymatgen.analysis.molecule_matcher import MoleculeMatcher

@@ -86,6 +86,8 @@ method parses the available VASP energy, magnetic moment, structure, and
 valence-electron data. It also attempts to read Bader charges and magnetic
 moments when those files are available; unavailable values are logged, and
 construction fails if no usable energy, geometry, or magnetic moment is found.
+Missing VASP and Bader files are logged at debug level during extraction;
+malformed files still produce warnings.
 
 ```python
 entity = ChemicalEntity.from_vasp(

@@ -1,11 +1,14 @@
 from pathlib import Path
+import logging
 
 from math import isclose
 import numpy as np
+import pytest
 
 from pymatgen.core import Lattice, Structure
 
 from scimulib.abinitio_parser import VaspParser
+from scimulib.exceptions import OszicarError, VaspExtractionError
 
 
 # Path of the test output files from VASP (Au7Co6 cluster)
@@ -84,6 +87,80 @@ def test_vasp_parser_magmom_outcar():
     vasp_parser._vasprun_path = None
     vasp_parser._oszicar_path = None
     assert isclose(vasp_parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
+
+def test_missing_oszicar_falls_back_to_outcar_without_warning(tmp_path, caplog):
+    parser = VaspParser(DATA_DIRECTORY)
+    parser._oszicar_path = tmp_path / "OSZICAR"
+    caplog.set_level(logging.DEBUG)
+
+    assert isclose(parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
+    records = [
+        record for record in caplog.records
+        if "OSZICAR failed to provide net magnetic moment" in record.message
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+
+def test_invalid_oszicar_still_warns_when_using_outcar(monkeypatch, caplog):
+    parser = VaspParser(DATA_DIRECTORY)
+
+    def fail_oszicar(**kwargs):
+        raise OszicarError("invalid OSZICAR")
+
+    monkeypatch.setattr(parser, "extract_oszicar_property", fail_oszicar)
+    caplog.set_level(logging.DEBUG)
+
+    assert isclose(parser.get_net_magmom(), magmom_txt, abs_tol=0.0001)
+    records = [
+        record for record in caplog.records
+        if "OSZICAR failed to provide net magnetic moment" in record.message
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+
+@pytest.mark.parametrize(
+    ("method", "expected_sources"),
+    [
+        ("get_total_energy", ["vasprun.xml", "OSZICAR", "OUTCAR"]),
+        ("get_net_magmom", ["OSZICAR", "OUTCAR"]),
+        ("get_structure", ["vasprun.xml", "POSCAR", "CONTCAR", "OUTCAR"]),
+        ("get_valence_electrons", ["OUTCAR", "POTCAR"]),
+    ],
+)
+def test_missing_vasp_files_are_debug_logged(tmp_path, caplog, method, expected_sources):
+    parser = VaspParser(tmp_path)
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(VaspExtractionError):
+        getattr(parser, method)()
+
+    assert len(caplog.records) == len(expected_sources)
+    for record, source in zip(caplog.records, expected_sources):
+        assert source in record.message
+        assert record.levelno == logging.DEBUG
+
+@pytest.mark.parametrize(
+    ("method", "extractor", "source"),
+    [
+        ("get_total_energy", "extract_vasprun_property", "vasprun.xml"),
+        ("get_structure", "extract_vasprun_property", "vasprun.xml"),
+        ("get_valence_electrons", "extract_outcar_valence_electrons", "OUTCAR"),
+    ],
+)
+def test_vasp_extraction_errors_still_warn(tmp_path, monkeypatch, caplog, method, extractor, source):
+    parser = VaspParser(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise ValueError("invalid output")
+
+    monkeypatch.setattr(parser, extractor, fail)
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(VaspExtractionError):
+        getattr(parser, method)()
+
+    assert source in caplog.records[0].message
+    assert caplog.records[0].levelno == logging.WARNING
 
 def test_vasp_parser_valence_electrons_outcar():
     vasp_parser = VaspParser(DATA_DIRECTORY)

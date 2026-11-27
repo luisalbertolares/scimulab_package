@@ -17,6 +17,11 @@ from scimulib.exceptions import (
 )
 
 
+def _log_extraction_failure(error: Exception, message: str) -> None:
+    log = logging.debug if isinstance(error, FileNotFoundError) else logging.warning
+    log(message)
+
+
 class VaspParser:
     """
     A class to parse the results of a VASP calculation. It provides methods to 
@@ -706,7 +711,8 @@ class VaspParser:
         try:
             return float(self.extract_vasprun_property("final_energy"))
         except (FileNotFoundError, ValueError, AttributeError, VasprunError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"vasprun.xml failed to provide total energy "
                 f"({type(e).__name__} - {e}). Trying OSZICAR."
             )
@@ -719,7 +725,8 @@ class VaspParser:
                 )
             )
         except (FileNotFoundError, ValueError, OszicarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"OSZICAR failed to provide total energy "
                 f"({type(e).__name__} - {e}). Trying OUTCAR."
             )
@@ -730,7 +737,8 @@ class VaspParser:
                 property_name="total energy"
             )
         except (FileNotFoundError, ValueError, OutcarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"OUTCAR failed to provide total energy ({type(e).__name__} - {e})."
             )
 
@@ -768,7 +776,8 @@ class VaspParser:
                 )
             )
         except (FileNotFoundError, ValueError, OszicarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"OSZICAR failed to provide net magnetic moment "
                 f"({type(e).__name__} - {e}). Trying OUTCAR."
             )
@@ -779,7 +788,8 @@ class VaspParser:
                 property_name="net magnetic moment"
             )
         except (FileNotFoundError, ValueError, OutcarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"OUTCAR failed to provide net magnetic moment ({type(e).__name__} - {e})."
             )
 
@@ -810,7 +820,8 @@ class VaspParser:
         try:
             return self.extract_vasprun_property("final_structure")
         except (FileNotFoundError, ValueError, AttributeError, VasprunError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"vasprun.xml failed to provide geometry "
                 f"({type(e).__name__} - {e}). Trying POSCAR/CONTCAR."
             )
@@ -818,14 +829,16 @@ class VaspParser:
         try:
             return Structure.from_file(self._poscar_path)
         except (OSError, ValueError, IndexError, TypeError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"POSCAR failed to provide geometry "
                 f"({type(e).__name__} - {e}). Trying CONTCAR."
             )
         try:
             return Structure.from_file(self._contcar_path)
         except (OSError, ValueError, IndexError, TypeError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"CONTCAR failed to provide geometry "
                 f"({type(e).__name__} - {e}). Trying OUTCAR."
             )
@@ -833,7 +846,9 @@ class VaspParser:
         try:
             return self.extract_outcar_structure()
         except (FileNotFoundError, ValueError, OutcarError) as e:
-            logging.warning(f"OUTCAR failed to provide geometry ({type(e).__name__} - {e}).")
+            _log_extraction_failure(
+                e, f"OUTCAR failed to provide geometry ({type(e).__name__} - {e})."
+            )
 
         raise VaspExtractionError(
             f"Unable to extract geometry from any VASP output files in: {self._directory}."
@@ -858,7 +873,8 @@ class VaspParser:
             valence_electrons = self.extract_outcar_valence_electrons()
             return valence_electrons
         except (FileNotFoundError, ValueError, OutcarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"Failed to extract valence electrons from OUTCAR "
                 f"({type(e).__name__} - {e}). Trying POTCAR."
             )
@@ -867,7 +883,8 @@ class VaspParser:
             valence_electrons = self.extract_potcar_property("nelectrons")
             return valence_electrons
         except (FileNotFoundError, ValueError, PotcarError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"Failed to extract valence electrons from POTCAR "
                 f"({type(e).__name__} - {e})."
             )
@@ -1019,13 +1036,13 @@ class BaderParser:
                 expected_atoms=self._expected_atoms
             )
         except (FileNotFoundError, TypeError, ValueError,AcfError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"Failed to extract charges from {target_path.name} ({type(e).__name__} - {e})."
             )
-
-        raise BaderExtractionError(
-            f"Unable to extract Bader charges from ACF file in: {self._directory}."
-        )
+            raise BaderExtractionError(
+                f"Unable to extract Bader charges from ACF file in: {self._directory}."
+            ) from e
 
     def get_magnetic_moments(self) -> np.ndarray:
         """
@@ -1045,11 +1062,11 @@ class BaderParser:
                 expected_atoms=self._expected_atoms
             )
         except (FileNotFoundError, TypeError, ValueError, AcfError) as e:
-            logging.warning(
+            _log_extraction_failure(
+                e,
                 f"Failed to extract magnetic moments from {self._acf_mag_path.name} "
                 f"({type(e).__name__} - {e})."
             )
-
-        raise BaderExtractionError(
-            f"Unable to extract Bader magnetic moments from ACF file in: {self._directory}."
-        )
+            raise BaderExtractionError(
+                f"Unable to extract Bader magnetic moments from ACF file in: {self._directory}."
+            ) from e

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scimulib"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Python package for post-processing ab initio calculation results of nanoparticle models, surfaces, and supported nanoparticle systems."
 authors = [
     { name = "Luis Alberto Lares Rangel", email = "luis.lares@icat.unam.mx" },

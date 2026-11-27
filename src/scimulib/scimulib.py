@@ -219,7 +219,8 @@ class ChemicalEntity:
                     f"{cls.__name__} '{entity_name}': Structure is None, cannot add Bader charges."
                 )
         except BaderExtractionError as e:
-            logging.warning(
+            log = logging.debug if isinstance(e.__cause__, FileNotFoundError) else logging.warning
+            log(
                 f"{cls.__name__} '{entity_name}': {e}"
             )
 
@@ -232,7 +233,8 @@ class ChemicalEntity:
                     f"{cls.__name__} '{entity_name}': Structure is None, cannot add Bader magnetic moments."
                 )
         except BaderExtractionError as e:
-            logging.warning(
+            log = logging.debug if isinstance(e.__cause__, FileNotFoundError) else logging.warning
+            log(
                 f"{cls.__name__} '{entity_name}': {e}"
             )
 

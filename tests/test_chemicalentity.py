@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+import logging
 from pathlib import Path
 from typing import get_type_hints
 
@@ -13,6 +14,7 @@ from scimulib.exceptions import (
     MagneticMomentMismatchError,
     MissingDataError,
     MissingReferenceError,
+    MissingSitePropertyError,
     MismatchedGeometryError,
     StoichiometryError,
     VaspExtractionError,
@@ -162,6 +164,47 @@ def test_from_vasp_handles_missing_optional_properties(tmp_path, monkeypatch):
     assert entity.composition == {"H": 1.0}
     with pytest.raises(MissingDataError):
         _ = entity.total_energy
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_from_vasp_bader_logging(tmp_path, monkeypatch, caplog, malformed):
+    class Parser:
+        def __init__(self, directory):
+            pass
+
+        def get_total_energy(self):
+            return -1.0
+
+        def get_net_magmom(self):
+            return 0.0
+
+        def get_structure(self):
+            return Structure(Lattice.cubic(5), ["H"], [[0, 0, 0]])
+
+        def get_valence_electrons(self):
+            return {"H": 1.0}
+
+    monkeypatch.setattr("scimulib.scimulib.VaspParser", Parser)
+    if malformed:
+        (tmp_path / "ACF.dat").write_text("invalid", encoding="utf-8")
+        (tmp_path / "ACF_mag.dat").write_text("invalid", encoding="utf-8")
+    caplog.set_level(logging.DEBUG)
+
+    entity = ChemicalEntity.from_vasp(tmp_path, name="H")
+
+    assert entity.total_energy == -1.0
+    for property_name in ("bader_charges", "bader_magnetic_moments"):
+        with pytest.raises(MissingSitePropertyError):
+            getattr(entity, property_name)
+    records = [
+        record for record in caplog.records
+        if "Bader" in record.message or "Failed to extract" in record.message
+    ]
+    assert len(records) == 4
+    assert all(
+        record.levelno == (logging.WARNING if malformed else logging.DEBUG)
+        for record in records
+    )
 
 
 def test_geometry_and_valence_changes_refresh_derived_properties():
